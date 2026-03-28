@@ -1935,9 +1935,8 @@ void MainWindow::CreateControls() {
     ListView_SetTextColor(commitList_, DarkTheme::TextColor());
     SetListViewColumn(projectList_, 0, 340, L"Repositories");
     SetListViewColumn(commitList_, 0, 90, LoadStringResource(IDS_COL_HASH));
-    SetListViewColumn(commitList_, 1, 384, LoadStringResource(IDS_COL_MESSAGE));
-    SetListViewColumn(commitList_, 2, 140, LoadStringResource(IDS_COL_AUTHOR));
-    SetListViewColumn(commitList_, 3, 120, LoadStringResource(IDS_COL_DATE));
+    SetListViewColumn(commitList_, 1, 582, LoadStringResource(IDS_COL_MESSAGE));
+    SetListViewColumn(commitList_, 2, 120, LoadStringResource(IDS_COL_DATE));
 
     AddListViewRowsPadding(projectList_, 8);
     AddListViewRowsPadding(commitList_, 10);
@@ -2173,8 +2172,7 @@ void MainWindow::PopulateCommitList(const std::vector<CommitInfo>& commits) {
         item.pszText = const_cast<LPWSTR>(commits[i].hash.c_str());
         ListView_InsertItem(commitList_, &item);
         ListView_SetItemText(commitList_, static_cast<int>(i), 1, const_cast<LPWSTR>(commits[i].message.c_str()));
-        ListView_SetItemText(commitList_, static_cast<int>(i), 2, const_cast<LPWSTR>(commits[i].author.c_str()));
-        ListView_SetItemText(commitList_, static_cast<int>(i), 3, const_cast<LPWSTR>(commits[i].date.c_str()));
+        ListView_SetItemText(commitList_, static_cast<int>(i), 2, const_cast<LPWSTR>(commits[i].date.c_str()));
     }
 }
 
