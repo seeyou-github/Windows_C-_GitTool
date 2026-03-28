@@ -276,6 +276,7 @@ struct AsyncCommitRefreshState {
     std::wstring repoPath;
     int limit = 50;
     unsigned long long token = 0;
+    std::vector<CommitInfo> previousCommits;
     std::vector<CommitInfo> commits;
 };
 
@@ -1609,7 +1610,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         auto* state = reinterpret_cast<AsyncCommitRefreshState*>(lParam);
         if (state != nullptr) {
             if (state->token == commitRefreshToken_ && state->repoPath == GetSelectedProjectPath()) {
-                PopulateCommitList(state->commits);
+                if (!CommitRepository::AreCommitListsEqual(state->previousCommits, state->commits)) {
+                    PopulateCommitList(state->commits);
+                }
             }
             delete state;
         }
@@ -2150,6 +2153,7 @@ void MainWindow::RefreshCommitList() {
     state->repoPath = path;
     state->limit = 50;
     state->token = ++commitRefreshToken_;
+    state->previousCommits = cachedCommits;
 
     const HANDLE thread = CreateThread(
         nullptr, 0, MainWindow::AsyncCommitRefreshThread, state, 0, nullptr);

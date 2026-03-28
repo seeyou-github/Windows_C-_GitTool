@@ -26,3 +26,21 @@ std::vector<CommitInfo> CommitRepository::LoadRecent(const std::wstring& repoPat
     }
     return commits;
 }
+
+bool CommitRepository::AreCommitListsEqual(
+    const std::vector<CommitInfo>& left,
+    const std::vector<CommitInfo>& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+
+    for (size_t i = 0; i < left.size(); ++i) {
+        if (left[i].hash != right[i].hash ||
+            left[i].message != right[i].message ||
+            left[i].author != right[i].author ||
+            left[i].date != right[i].date) {
+            return false;
+        }
+    }
+    return true;
+}

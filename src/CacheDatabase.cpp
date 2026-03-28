@@ -6,6 +6,7 @@
 namespace {
 
 constexpr unsigned int kMagic = 0x31424347;  // GCB1
+constexpr unsigned int kVersion = 1;
 
 std::string WideToUtf8(const std::wstring& text) {
     if (text.empty()) {
@@ -119,6 +120,14 @@ bool CacheDatabase::Load() {
         return false;
     }
 
+    unsigned int version = 0;
+    if (!ReadUInt32(input, &version) || version != kVersion) {
+        commitLists_.clear();
+        commitDetails_.clear();
+        diffContents_.clear();
+        return false;
+    }
+
     unsigned int commitListCount = 0;
     if (!ReadUInt32(input, &commitListCount)) {
         return false;
@@ -127,6 +136,9 @@ bool CacheDatabase::Load() {
         std::wstring repoPath;
         unsigned int itemCount = 0;
         if (!ReadWideString(input, &repoPath) || !ReadUInt32(input, &itemCount)) {
+            commitLists_.clear();
+            commitDetails_.clear();
+            diffContents_.clear();
             return false;
         }
         auto& commits = commitLists_[repoPath];
@@ -140,11 +152,17 @@ bool CacheDatabase::Load() {
 
     unsigned int detailCount = 0;
     if (!ReadUInt32(input, &detailCount)) {
+        commitLists_.clear();
+        commitDetails_.clear();
+        diffContents_.clear();
         return false;
     }
     for (unsigned int i = 0; i < detailCount; ++i) {
         std::wstring key;
         if (!ReadWideString(input, &key)) {
+            commitLists_.clear();
+            commitDetails_.clear();
+            diffContents_.clear();
             return false;
         }
         auto& record = commitDetails_[key];
@@ -155,6 +173,9 @@ bool CacheDatabase::Load() {
         record.diffs.resize(diffCount);
         for (unsigned int item = 0; item < diffCount; ++item) {
             if (!ReadCommitDiff(input, &record.diffs[item])) {
+                commitLists_.clear();
+                commitDetails_.clear();
+                diffContents_.clear();
                 return false;
             }
         }
@@ -162,16 +183,25 @@ bool CacheDatabase::Load() {
 
     unsigned int diffContentCount = 0;
     if (!ReadUInt32(input, &diffContentCount)) {
+        commitLists_.clear();
+        commitDetails_.clear();
+        diffContents_.clear();
         return false;
     }
     for (unsigned int i = 0; i < diffContentCount; ++i) {
         std::wstring key;
         if (!ReadWideString(input, &key)) {
+            commitLists_.clear();
+            commitDetails_.clear();
+            diffContents_.clear();
             return false;
         }
         auto& record = diffContents_[key];
         if (!ReadWideString(input, &record.beforeContent) ||
             !ReadWideString(input, &record.afterContent)) {
+            commitLists_.clear();
+            commitDetails_.clear();
+            diffContents_.clear();
             return false;
         }
     }
@@ -182,15 +212,22 @@ bool CacheDatabase::Load() {
 bool CacheDatabase::Save() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (path_.empty()) {
+        commitLists_.clear();
+        commitDetails_.clear();
+        diffContents_.clear();
         return false;
     }
 
     std::ofstream output(path_.c_str(), std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
-        return false;
+            commitLists_.clear();
+            commitDetails_.clear();
+            diffContents_.clear();
+            return false;
     }
 
     WriteUInt32(output, kMagic);
+    WriteUInt32(output, kVersion);
 
     WriteUInt32(output, static_cast<unsigned int>(commitLists_.size()));
     for (const auto& entry : commitLists_) {

@@ -12,6 +12,9 @@ public:
     std::vector<CommitInfo> GetCachedRecent(const std::wstring& repoPath, int limit) const;
     void UpdateCache(const std::wstring& repoPath, const std::vector<CommitInfo>& commits);
     std::vector<CommitInfo> LoadRecent(const std::wstring& repoPath, int limit) const;
+    static bool AreCommitListsEqual(
+        const std::vector<CommitInfo>& left,
+        const std::vector<CommitInfo>& right);
 
 private:
     mutable std::mutex mutex_;
