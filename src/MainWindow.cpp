@@ -2553,6 +2553,7 @@ void MainWindow::LayoutControls(int width, int height) {
     MoveWindow(buttonOpenGitHub_, rightX + rightWidth - iconButtonSize, kPadding, iconButtonSize, iconButtonSize, TRUE);
 
     MoveWindow(commitList_, rightX, contentTop, rightWidth, paneHeight, TRUE);
+    UpdateCommitListColumnWidths(rightWidth);
     const int logTop = contentTop + paneHeight + splitGap;
     MoveWindow(logEdit_, rightX, logTop, rightWidth - kLogScrollBarWidth, paneHeight, TRUE);
     MoveWindow(logScrollBar_, rightX + rightWidth - kLogScrollBarWidth, logTop, kLogScrollBarWidth, paneHeight, TRUE);
@@ -2566,6 +2567,21 @@ void MainWindow::LayoutControls(int width, int height) {
 void MainWindow::UpdateProjectListColumnWidth(int listWidth) {
     const int safeWidth = std::max(120, listWidth - 24);
     ListView_SetColumnWidth(projectList_, 0, safeWidth);
+}
+
+void MainWindow::UpdateCommitListColumnWidths(int listWidth) {
+    if (commitList_ == nullptr) {
+        return;
+    }
+
+    const int safeWidth = std::max(320, listWidth - 4);
+    const int hashWidth = 110;
+    const int dateWidth = 150;
+    const int messageWidth = std::max(180, safeWidth - hashWidth - dateWidth - 24);
+
+    ListView_SetColumnWidth(commitList_, 0, hashWidth);
+    ListView_SetColumnWidth(commitList_, 1, messageWidth);
+    ListView_SetColumnWidth(commitList_, 2, dateWidth);
 }
 
 void MainWindow::UpdateLogScrollBar() {

@@ -28,6 +28,7 @@ private:
     void LayoutControls(int width, int height);
     void SetCommandUiState(bool running, const std::wstring& statusText = L"");
     void UpdateProjectListColumnWidth(int listWidth);
+    void UpdateCommitListColumnWidths(int listWidth);
     void UpdateLogScrollBar();
     void ScrollLogToPosition(int position);
     void ApplyFonts();
