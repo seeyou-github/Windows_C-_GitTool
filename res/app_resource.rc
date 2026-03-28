@@ -4,6 +4,8 @@
 
 LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
 
+IDR_GITHUB_IMAGE RCDATA "github.jpg"
+
 STRINGTABLE
 BEGIN
     IDS_APP_TITLE "Git Visual Tool"
@@ -16,6 +18,7 @@ BEGIN
     IDS_BTN_FETCH "fetch"
     IDS_BTN_BRANCH "branch"
     IDS_BTN_REMOTE "remote"
+    IDS_BTN_OPEN_GITHUB "Open GitHub"
     IDS_COL_HASH "Hash"
     IDS_COL_MESSAGE "Message"
     IDS_COL_AUTHOR "Author"

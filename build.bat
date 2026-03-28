@@ -8,7 +8,7 @@ if not exist build mkdir build
 set CXX=g++
 set RC=windres
 set CXXFLAGS=-std=c++17 -DUNICODE -D_UNICODE -Wall -Wextra
-set LDFLAGS=-municode -mwindows -lcomctl32 -lshell32 -lole32 -luuid -ldwmapi
+set LDFLAGS=-municode -mwindows -lcomctl32 -lshell32 -lole32 -luuid -ldwmapi -lgdiplus
 
 %CXX% -c src\main.cpp %CXXFLAGS% -o build\main.o
 if errorlevel 1 goto error

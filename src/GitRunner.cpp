@@ -79,6 +79,22 @@ std::vector<std::wstring> SplitLines(const std::wstring& text) {
     return lines;
 }
 
+std::wstring StripAnsiEscapes(const std::wstring& text) {
+    std::wstring cleaned;
+    cleaned.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == L'\x001b' && i + 1 < text.size() && text[i + 1] == L'[') {
+            i += 2;
+            while (i < text.size() && text[i] != L'm') {
+                ++i;
+            }
+            continue;
+        }
+        cleaned.push_back(text[i]);
+    }
+    return cleaned;
+}
+
 std::wstring TrimText(const std::wstring& value) {
     const wchar_t* whitespace = L" \t\r\n";
     const size_t begin = value.find_first_not_of(whitespace);
@@ -207,7 +223,46 @@ std::vector<CommitInfo> GitRunner::GetRecentCommits(const std::wstring& repoPath
         return commits;
     }
 
-    for (const std::wstring& line : SplitLines(result.output)) {
+    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
+        if (line.empty()) {
+            continue;
+        }
+        size_t first = line.find(L'\x001f');
+        size_t second = first == std::wstring::npos ? std::wstring::npos : line.find(L'\x001f', first + 1);
+        size_t third = second == std::wstring::npos ? std::wstring::npos : line.find(L'\x001f', second + 1);
+        if (first == std::wstring::npos || second == std::wstring::npos || third == std::wstring::npos) {
+            continue;
+        }
+
+        CommitInfo info;
+        info.hash = line.substr(0, first);
+        info.message = line.substr(first + 1, second - first - 1);
+        info.author = line.substr(second + 1, third - second - 1);
+        info.date = line.substr(third + 1);
+        commits.push_back(info);
+    }
+
+    return commits;
+}
+
+std::vector<CommitInfo> GitRunner::GetUnpushedCommits(const std::wstring& repoPath, int limit) {
+    std::vector<CommitInfo> commits;
+    const std::wstring format = L"%h%x1f%s%x1f%an%x1f%ad";
+    std::vector<std::wstring> args = {
+        L"log", L"--date=short", L"--pretty=format:" + format, L"-n", std::to_wstring(limit)
+    };
+
+    const GitCommandResult upstreamResult = RunGitCommand(repoPath, {L"rev-parse", L"--abbrev-ref", L"@{upstream}"});
+    if (upstreamResult.success) {
+        args.push_back(L"@{upstream}..HEAD");
+    }
+
+    const GitCommandResult result = RunGitCommand(repoPath, args);
+    if (!result.success) {
+        return commits;
+    }
+
+    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
         if (line.empty()) {
             continue;
         }
@@ -235,7 +290,7 @@ std::vector<std::wstring> GitRunner::GetLocalBranches(const std::wstring& repoPa
     if (!result.success) {
         return branches;
     }
-    for (const std::wstring& line : SplitLines(result.output)) {
+    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
         if (!line.empty()) {
             branches.push_back(line);
         }
@@ -248,7 +303,7 @@ std::wstring GitRunner::GetCurrentBranch(const std::wstring& repoPath) {
     if (!result.success) {
         return L"";
     }
-    for (const std::wstring& line : SplitLines(result.output)) {
+    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
         if (!line.empty()) {
             return line;
         }
@@ -260,7 +315,7 @@ std::wstring GitRunner::GetCommitDetails(const std::wstring& repoPath, const std
     const GitCommandResult result = RunGitCommand(
         repoPath,
         {L"show", L"--date=format:%Y-%m-%d %H:%M:%S", L"--format=%H%x1f%cn%x1f%cd%x1f%B", L"--no-patch", commitHash});
-    return result.success ? result.output : result.output;
+    return StripAnsiEscapes(result.output);
 }
 
 std::vector<CommitFileDiff> GitRunner::GetCommitFileDiffs(
@@ -275,7 +330,7 @@ std::vector<CommitFileDiff> GitRunner::GetCommitFileDiffs(
         return diffs;
     }
 
-    for (const std::wstring& line : SplitLines(namesResult.output)) {
+    for (const std::wstring& line : SplitLines(StripAnsiEscapes(namesResult.output))) {
         if (line.empty()) {
             continue;
         }
@@ -337,7 +392,7 @@ std::vector<CommitFileDiff> GitRunner::GetWorkingTreeDiffs(const std::wstring& r
         return diffs;
     }
 
-    for (const std::wstring& line : SplitLines(result.output)) {
+    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
         if (line.size() < 3) {
             continue;
         }

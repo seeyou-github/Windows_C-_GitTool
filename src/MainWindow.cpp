@@ -4,12 +4,15 @@
 #include "ResourceIds.h"
 
 #include <commctrl.h>
+#include <gdiplus.h>
+#include <objidl.h>
 #include <richedit.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <windowsx.h>
 
 #include <algorithm>
+#include <memory>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -21,6 +24,7 @@ constexpr wchar_t kDarkScrollBarClass[] = L"GitVisualToolDarkScrollBar";
 constexpr wchar_t kCommitDetailWindowClass[] = L"GitVisualToolCommitDetailWindow";
 constexpr wchar_t kDiffContentWindowClass[] = L"GitVisualToolDiffContentWindow";
 constexpr wchar_t kCommitComposeWindowClass[] = L"GitVisualToolCommitComposeWindow";
+constexpr wchar_t kSquashComposeWindowClass[] = L"GitVisualToolSquashComposeWindow";
 constexpr UINT WM_APP_GIT_COMMAND_DONE = WM_APP + 1;
 constexpr UINT WM_APP_COMMITS_REFRESH_DONE = WM_APP + 2;
 constexpr int kToolbarHeight = 44;
@@ -36,6 +40,7 @@ constexpr COLORREF kMenuBackground = RGB(242, 242, 242);
 constexpr COLORREF kMenuHoverBackground = RGB(228, 228, 228);
 constexpr COLORREF kMenuText = RGB(40, 40, 40);
 constexpr COLORREF kLogDefaultText = RGB(170, 176, 184);
+std::unique_ptr<Gdiplus::Bitmap> g_githubBitmap;
 
 std::wstring Trim(const std::wstring& value) {
     const wchar_t* whitespace = L" \t\r\n";
@@ -50,6 +55,88 @@ std::wstring Trim(const std::wstring& value) {
 std::wstring BaseNameFromPath(const std::wstring& path) {
     const size_t pos = path.find_last_of(L"\\/");
     return pos == std::wstring::npos ? path : path.substr(pos + 1);
+}
+
+bool StartsWith(const std::wstring& value, const std::wstring& prefix) {
+    return value.size() >= prefix.size() &&
+           std::equal(prefix.begin(), prefix.end(), value.begin());
+}
+
+std::wstring NormalizeGitHubRemoteUrl(const std::wstring& remoteUrl) {
+    std::wstring url = Trim(remoteUrl);
+    if (url.empty()) {
+        return L"";
+    }
+
+    const std::wstring suffix = L".git";
+    if (url.size() > suffix.size() &&
+        url.compare(url.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        url.erase(url.size() - suffix.size());
+    }
+
+    std::wstring pathPart;
+    if (StartsWith(url, L"git@github.com:")) {
+        pathPart = url.substr(15);
+    } else if (StartsWith(url, L"ssh://git@github.com/")) {
+        pathPart = url.substr(21);
+    } else if (StartsWith(url, L"https://github.com/")) {
+        pathPart = url.substr(19);
+    } else if (StartsWith(url, L"http://github.com/")) {
+        pathPart = url.substr(18);
+    } else {
+        return L"";
+    }
+
+    while (!pathPart.empty() && (pathPart.front() == L'/' || pathPart.front() == L'\\')) {
+        pathPart.erase(pathPart.begin());
+    }
+    if (pathPart.empty()) {
+        return L"";
+    }
+    return L"https://github.com/" + pathPart;
+}
+
+Gdiplus::Bitmap* GetGitHubBitmap() {
+    if (!g_githubBitmap) {
+        HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_GITHUB_IMAGE), RT_RCDATA);
+        if (resource == nullptr) {
+            return nullptr;
+        }
+        HGLOBAL loaded = LoadResource(nullptr, resource);
+        if (loaded == nullptr) {
+            return nullptr;
+        }
+        const DWORD size = SizeofResource(nullptr, resource);
+        const void* data = LockResource(loaded);
+        if (data == nullptr || size == 0) {
+            return nullptr;
+        }
+
+        HGLOBAL buffer = GlobalAlloc(GMEM_MOVEABLE, size);
+        if (buffer == nullptr) {
+            return nullptr;
+        }
+        void* memory = GlobalLock(buffer);
+        if (memory == nullptr) {
+            GlobalFree(buffer);
+            return nullptr;
+        }
+        CopyMemory(memory, data, size);
+        GlobalUnlock(buffer);
+
+        IStream* stream = nullptr;
+        if (CreateStreamOnHGlobal(buffer, TRUE, &stream) != S_OK || stream == nullptr) {
+            GlobalFree(buffer);
+            return nullptr;
+        }
+
+        std::unique_ptr<Gdiplus::Bitmap> bitmap(Gdiplus::Bitmap::FromStream(stream));
+        stream->Release();
+        if (bitmap && bitmap->GetLastStatus() == Gdiplus::Ok) {
+            g_githubBitmap = std::move(bitmap);
+        }
+    }
+    return g_githubBitmap.get();
 }
 
 COLORREF MapAnsiColor(int code, COLORREF fallback) {
@@ -98,13 +185,13 @@ void FreeProjectListItemData(HWND listView) {
 bool IsOwnerDrawButtonId(UINT id) {
     return id == IDC_BTN_ADD_FOLDER ||
            id == IDC_BTN_STATUS ||
-           id == IDC_BTN_ADD_ALL ||
            id == IDC_BTN_COMMIT ||
            id == IDC_BTN_PUSH ||
            id == IDC_BTN_PULL ||
            id == IDC_BTN_FETCH ||
            id == IDC_BTN_BRANCH ||
            id == IDC_BTN_REMOTE ||
+           id == IDC_BTN_OPEN_GITHUB ||
            id == IDC_BTN_STOP;
 }
 
@@ -125,6 +212,20 @@ void DrawOwnerDrawButton(const DRAWITEMSTRUCT* dis) {
     SelectObject(dis->hDC, oldBrush);
     SelectObject(dis->hDC, oldPen);
     DeleteObject(pen);
+
+    if (dis->CtlID == IDC_BTN_OPEN_GITHUB) {
+        if (auto* bitmap = GetGitHubBitmap(); bitmap != nullptr) {
+            Gdiplus::Graphics graphics(dis->hDC);
+            graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            const int buttonHeight = rect.bottom - rect.top;
+            const int iconSize = std::max(1, buttonHeight - 2);
+            const int x = rect.left + ((rect.right - rect.left) - iconSize) / 2;
+            const int y = rect.top + ((rect.bottom - rect.top) - iconSize) / 2;
+            graphics.DrawImage(bitmap, x, y, iconSize, iconSize);
+        }
+        return;
+    }
 
     SetBkMode(dis->hDC, TRANSPARENT);
     SetTextColor(dis->hDC, DarkTheme::TextColor());
@@ -263,8 +364,8 @@ struct PromptDialogState {
 struct AsyncGitCommandState {
     HWND hwnd = nullptr;
     std::wstring repoPath;
+    std::vector<std::vector<std::wstring>> preCommands;
     std::vector<std::wstring> args;
-    bool refreshStatusAfter = true;
     bool refreshCommitsAfter = true;
     std::wstring cleanupFilePath;
     HANDLE cancelEvent = nullptr;
@@ -318,7 +419,10 @@ struct CommitComposeWindowState {
     std::wstring repoPath;
     std::wstring message;
     std::vector<CommitFileDiff> diffs;
+    std::vector<bool> checked;
+    std::vector<std::wstring> selectedPaths;
     HWND fileList = nullptr;
+    HWND selectAllButton = nullptr;
     HWND messageEdit = nullptr;
     HWND okButton = nullptr;
     HWND cancelButton = nullptr;
@@ -329,6 +433,97 @@ struct CommitComposeWindowState {
     WNDPROC editProc = nullptr;
     bool accepted = false;
 };
+
+struct SquashComposeWindowState {
+    HWND parent = nullptr;
+    std::wstring title;
+    std::wstring repoPath;
+    std::wstring message;
+    std::vector<CommitInfo> commits;
+    std::vector<bool> checked;
+    int selectedCount = 0;
+    HWND commitList = nullptr;
+    HWND selectAllButton = nullptr;
+    HWND messageEdit = nullptr;
+    HWND okButton = nullptr;
+    HWND cancelButton = nullptr;
+    HWND hintLabel = nullptr;
+    HWND messageLabel = nullptr;
+    HFONT uiFont = nullptr;
+    WNDPROC editProc = nullptr;
+    bool accepted = false;
+};
+
+void UpdateCommitComposeOkState(CommitComposeWindowState* state) {
+    if (state == nullptr || state->okButton == nullptr) {
+        return;
+    }
+    const bool hasChecked = std::any_of(state->checked.begin(), state->checked.end(), [](bool value) { return value; });
+    EnableWindow(state->okButton, hasChecked ? TRUE : FALSE);
+}
+
+void UpdateSquashComposeOkState(SquashComposeWindowState* state) {
+    if (state == nullptr || state->okButton == nullptr) {
+        return;
+    }
+
+    int selectedCount = 0;
+    bool foundGap = false;
+    bool invalidSelection = false;
+    for (size_t i = 0; i < state->checked.size(); ++i) {
+        if (state->checked[i]) {
+            if (foundGap) {
+                invalidSelection = true;
+                break;
+            }
+            ++selectedCount;
+        } else if (selectedCount > 0) {
+            foundGap = true;
+        }
+    }
+
+    state->selectedCount = invalidSelection ? 0 : selectedCount;
+    EnableWindow(state->okButton, (!invalidSelection && selectedCount >= 2) ? TRUE : FALSE);
+}
+
+std::wstring BuildSquashCommitLabel(const CommitInfo& commit) {
+    std::wstring label = commit.hash;
+    label += L"  ";
+    label += commit.date;
+    label += L"  ";
+    label += commit.message;
+    return label;
+}
+
+std::vector<std::wstring> GetCommitComposeSelectedPaths(const CommitComposeWindowState* state) {
+    std::vector<std::wstring> selectedPaths;
+    if (state == nullptr) {
+        return selectedPaths;
+    }
+
+    for (size_t i = 0; i < state->diffs.size() && i < state->checked.size(); ++i) {
+        if (!state->checked[i]) {
+            continue;
+        }
+
+        const CommitFileDiff& diff = state->diffs[i];
+        if (diff.status == L'R') {
+            if (!diff.oldPath.empty()) {
+                selectedPaths.push_back(diff.oldPath);
+            }
+            if (!diff.newPath.empty() && diff.newPath != diff.oldPath) {
+                selectedPaths.push_back(diff.newPath);
+            }
+            continue;
+        }
+
+        const std::wstring& path = diff.status == L'D' ? diff.oldPath : diff.patchPath;
+        if (!path.empty()) {
+            selectedPaths.push_back(path);
+        }
+    }
+    return selectedPaths;
+}
 
 COLORREF GetCommitStatusColor(wchar_t status) {
     switch (status) {
@@ -711,6 +906,20 @@ LRESULT CALLBACK CommitComposeEditProc(HWND hwnd, UINT message, WPARAM wParam, L
     return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam);
 }
 
+LRESULT CALLBACK SquashComposeEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    HWND parent = GetParent(hwnd);
+    auto* state = reinterpret_cast<SquashComposeWindowState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+    if (state == nullptr || state->editProc == nullptr) {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    if (message == WM_GETDLGCODE) {
+        return DLGC_WANTALLKEYS | DLGC_WANTCHARS | DLGC_HASSETSEL;
+    }
+
+    return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam);
+}
+
 std::wstring FormatCommitSummary(const std::wstring& rawDetails) {
     std::vector<std::wstring> parts;
     size_t start = 0;
@@ -889,14 +1098,18 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         DarkTheme::ApplyTitleBar(hwnd);
 
         state->hintLabel = CreateWindowExW(
-            0, L"STATIC", L"Double-click a diff file to compare.",
+            0, L"STATIC", L"Select files to stage, then double-click a diff file to compare.",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->selectAllButton = CreateWindowExW(
+            0, L"BUTTON", L"Select All",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4303), cs->hInstance, nullptr);
         state->messageLabel = CreateWindowExW(
             0, L"STATIC", L"Commit Message",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
         state->fileList = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-            WS_CHILD | WS_VISIBLE | LBS_NOTIFY | LBS_OWNERDRAWFIXED | WS_VSCROLL,
+            0, WC_LISTVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4301), cs->hInstance, nullptr);
         state->messageEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->message.c_str(),
@@ -913,6 +1126,7 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
 
         SendMessageW(state->hintLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->selectAllButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->messageLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->fileList, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->okButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
@@ -922,17 +1136,30 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             state->uiFont,
             DarkTheme::ControlBackground(),
             DarkTheme::TextColor());
-        DarkTheme::DisableVisualTheme(state->fileList);
+        DarkTheme::ApplyDarkControlTheme(state->fileList);
         DarkTheme::ApplyDarkControlTheme(state->messageEdit);
+        ListView_SetExtendedListViewStyle(
+            state->fileList,
+            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_CHECKBOXES);
+        ListView_SetBkColor(state->fileList, DarkTheme::ControlBackground());
+        ListView_SetTextBkColor(state->fileList, DarkTheme::ControlBackground());
+        ListView_SetTextColor(state->fileList, DarkTheme::TextColor());
+        SetListViewColumn(state->fileList, 0, 200, L"Files");
         state->editProc = reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(state->messageEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(CommitComposeEditProc)));
 
+        state->checked.assign(state->diffs.size(), true);
         for (size_t i = 0; i < state->diffs.size(); ++i) {
-            const int itemIndex = static_cast<int>(SendMessageW(
-                state->fileList, LB_ADDSTRING, 0,
-                reinterpret_cast<LPARAM>(BuildCommitFileLabel(state->diffs[i]).c_str())));
-            SendMessageW(state->fileList, LB_SETITEMDATA, itemIndex, static_cast<LPARAM>(i));
+            LVITEMW item{};
+            item.mask = LVIF_TEXT | LVIF_PARAM;
+            item.iItem = static_cast<int>(i);
+            const std::wstring label = BuildCommitFileLabel(state->diffs[i]);
+            item.pszText = const_cast<LPWSTR>(label.c_str());
+            item.lParam = static_cast<LPARAM>(i);
+            ListView_InsertItem(state->fileList, &item);
+            ListView_SetCheckState(state->fileList, static_cast<int>(i), TRUE);
         }
+        UpdateCommitComposeOkState(state);
         SetFocus(state->messageEdit);
         return 0;
     }
@@ -944,46 +1171,292 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             const int footerHeight = 34;
             const int labelHeight = 24;
             const int columnGap = 12;
-            const int leftWidth = (rc.right - padding * 2 - columnGap) * 35 / 100;
+            const int topRowHeight = 30;
+            const int leftWidth = (rc.right - padding * 2 - columnGap) * 38 / 100;
             const int rightX = padding + leftWidth + columnGap;
             const int rightWidth = rc.right - rightX - padding;
-            const int contentHeight = rc.bottom - padding * 3 - footerHeight - labelHeight;
+            const int contentTop = padding + topRowHeight + 6;
+            const int contentHeight = rc.bottom - contentTop - padding * 2 - footerHeight;
+            const int selectAllWidth = 112;
+
+            MoveWindow(state->hintLabel, padding, padding, leftWidth - selectAllWidth - 8, labelHeight, TRUE);
+            MoveWindow(state->selectAllButton, padding + leftWidth - selectAllWidth, padding, selectAllWidth, topRowHeight, TRUE);
+            MoveWindow(state->messageLabel, rightX, padding, rightWidth, labelHeight, TRUE);
+            MoveWindow(state->fileList, padding, contentTop, leftWidth, contentHeight, TRUE);
+            MoveWindow(state->messageEdit, rightX, contentTop, rightWidth, contentHeight, TRUE);
+            MoveWindow(state->cancelButton, rc.right - padding - 96, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
+            MoveWindow(state->okButton, rc.right - padding - 96 - 104, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
+            ListView_SetColumnWidth(state->fileList, 0, std::max(180, leftWidth - 24));
+        }
+        return 0;
+    case WM_NOTIFY: {
+        auto* header = reinterpret_cast<NMHDR*>(lParam);
+        if (state != nullptr && header != nullptr && header->hwndFrom == state->fileList) {
+            if (header->code == LVN_ITEMCHANGED) {
+                const int count = ListView_GetItemCount(state->fileList);
+                for (int i = 0; i < count && i < static_cast<int>(state->checked.size()); ++i) {
+                    state->checked[i] = ListView_GetCheckState(state->fileList, i) != FALSE;
+                }
+                UpdateCommitComposeOkState(state);
+                return 0;
+            }
+            if (header->code == NM_DBLCLK) {
+                const int index = ListView_GetNextItem(state->fileList, -1, LVNI_SELECTED);
+                if (index >= 0 && index < static_cast<int>(state->diffs.size())) {
+                    const CommitFileDiff& diff = state->diffs[index];
+                    std::wstring beforeContent;
+                    std::wstring afterContent;
+                    const std::filesystem::path repoRootPath(state->repoPath);
+
+                    if (diff.status != L'A') {
+                        const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
+                        beforeContent = GitRunner::GetFileContentAtRevision(state->repoPath, L"HEAD", beforePath);
+                    }
+                    if (diff.status != L'D') {
+                        const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
+                        afterContent = GitRunner::ReadWorkingTreeFile((repoRootPath / std::filesystem::path(afterPath)).wstring());
+                    }
+
+                    ShowDiffWindow(
+                        hwnd,
+                        L"Diff - " + BuildCommitFileLabel(diff),
+                        beforeContent,
+                        afterContent,
+                        state->uiFont,
+                        state->codeFont);
+                }
+                return 0;
+            }
+            if (header->code == NM_CUSTOMDRAW) {
+                auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    const size_t itemIndex = static_cast<size_t>(draw->nmcd.dwItemSpec);
+                    if (itemIndex < state->diffs.size()) {
+                        draw->clrText = GetCommitStatusColor(state->diffs[itemIndex].status);
+                    } else {
+                        draw->clrText = DarkTheme::TextColor();
+                    }
+                    draw->clrTextBk = DarkTheme::ControlBackground();
+                    return CDRF_DODEFAULT;
+                }
+            }
+        }
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == 4303 && state != nullptr) {
+            const int count = ListView_GetItemCount(state->fileList);
+            for (int i = 0; i < count; ++i) {
+                ListView_SetCheckState(state->fileList, i, TRUE);
+                if (i < static_cast<int>(state->checked.size())) {
+                    state->checked[i] = true;
+                }
+            }
+            UpdateCommitComposeOkState(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDOK && state != nullptr) {
+            const int length = GetWindowTextLengthW(state->messageEdit);
+            std::wstring text(static_cast<size_t>(length), L'\0');
+            if (length > 0) {
+                std::vector<wchar_t> buffer(static_cast<size_t>(length) + 1, L'\0');
+                GetWindowTextW(state->messageEdit, buffer.data(), length + 1);
+                text.assign(buffer.data());
+            }
+            state->selectedPaths = GetCommitComposeSelectedPaths(state);
+            if (state->selectedPaths.empty()) {
+                UpdateCommitComposeOkState(state);
+                return 0;
+            }
+            state->message = text;
+            state->accepted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (state != nullptr && state->parent != nullptr && IsWindow(state->parent)) {
+            EnableWindow(state->parent, TRUE);
+            SetForegroundWindow(state->parent);
+            SetActiveWindow(state->parent);
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK SquashComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<SquashComposeWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<SquashComposeWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->hintLabel = CreateWindowExW(
+            0, L"STATIC", L"合并最近的未 push 提交，只能从最新提交开始连续选择。",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->selectAllButton = CreateWindowExW(
+            0, L"BUTTON", L"全选",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4403), cs->hInstance, nullptr);
+        state->messageLabel = CreateWindowExW(
+            0, L"STATIC", L"新提交信息",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->commitList = CreateWindowExW(
+            0, WC_LISTVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4401), cs->hInstance, nullptr);
+        state->messageEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->message.c_str(),
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4402), cs->hInstance, nullptr);
+        state->okButton = CreateWindowExW(
+            0, L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
+        state->cancelButton = CreateWindowExW(
+            0, L"BUTTON", L"Cancel",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+
+        SendMessageW(state->hintLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->selectAllButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->messageLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->commitList, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->okButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->cancelButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        ConfigureRichEditColors(state->messageEdit, state->uiFont, DarkTheme::ControlBackground(), DarkTheme::TextColor());
+        DarkTheme::ApplyDarkControlTheme(state->commitList);
+        DarkTheme::ApplyDarkControlTheme(state->messageEdit);
+        ListView_SetExtendedListViewStyle(
+            state->commitList,
+            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_CHECKBOXES);
+        ListView_SetBkColor(state->commitList, DarkTheme::ControlBackground());
+        ListView_SetTextBkColor(state->commitList, DarkTheme::ControlBackground());
+        ListView_SetTextColor(state->commitList, DarkTheme::TextColor());
+        SetListViewColumn(state->commitList, 0, 240, L"Commits");
+        state->editProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->messageEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(SquashComposeEditProc)));
+
+        state->checked.assign(state->commits.size(), false);
+        for (size_t i = 0; i < state->commits.size(); ++i) {
+            LVITEMW item{};
+            item.mask = LVIF_TEXT | LVIF_PARAM;
+            item.iItem = static_cast<int>(i);
+            const std::wstring label = BuildSquashCommitLabel(state->commits[i]);
+            item.pszText = const_cast<LPWSTR>(label.c_str());
+            item.lParam = static_cast<LPARAM>(i);
+            ListView_InsertItem(state->commitList, &item);
+            ListView_SetCheckState(state->commitList, static_cast<int>(i), FALSE);
+        }
+
+        UpdateSquashComposeOkState(state);
+        SetFocus(state->messageEdit);
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 12;
+            const int footerHeight = 34;
+            const int labelHeight = 24;
+            const int columnGap = 12;
+            const int topRowHeight = 30;
+            const int leftWidth = (rc.right - padding * 2 - columnGap) * 6 / 10;
+            const int rightX = padding + leftWidth + columnGap;
+            const int rightWidth = rc.right - rightX - padding;
+            const int contentTop = padding + labelHeight + 6;
+            const int contentHeight = rc.bottom - contentTop - padding * 3 - footerHeight - topRowHeight;
+            const int selectAllWidth = 112;
 
             MoveWindow(state->hintLabel, padding, padding, leftWidth, labelHeight, TRUE);
             MoveWindow(state->messageLabel, rightX, padding, rightWidth, labelHeight, TRUE);
-            MoveWindow(state->fileList, padding, padding + labelHeight + 4, leftWidth, contentHeight, TRUE);
-            MoveWindow(state->messageEdit, rightX, padding + labelHeight + 4, rightWidth, contentHeight, TRUE);
+            MoveWindow(state->commitList, padding, contentTop, leftWidth, contentHeight, TRUE);
+            MoveWindow(state->messageEdit, rightX, contentTop, rightWidth, contentHeight, TRUE);
+            MoveWindow(state->selectAllButton, padding, rc.bottom - padding - footerHeight, selectAllWidth, footerHeight, TRUE);
             MoveWindow(state->cancelButton, rc.right - padding - 96, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
             MoveWindow(state->okButton, rc.right - padding - 96 - 104, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
+            ListView_SetColumnWidth(state->commitList, 0, std::max(220, leftWidth - 24));
         }
         return 0;
-    case WM_COMMAND:
-        if (state != nullptr && reinterpret_cast<HWND>(lParam) == state->fileList && HIWORD(wParam) == LBN_DBLCLK) {
-            const int index = static_cast<int>(SendMessageW(state->fileList, LB_GETCURSEL, 0, 0));
-            if (index >= 0 && index < static_cast<int>(state->diffs.size())) {
-                const CommitFileDiff& diff = state->diffs[index];
-                std::wstring beforeContent;
-                std::wstring afterContent;
-                const std::wstring repoRoot = state->repoPath;
-                const std::filesystem::path repoRootPath(state->repoPath);
-
-                if (diff.status != L'A') {
-                    const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
-                    beforeContent = GitRunner::GetFileContentAtRevision(repoRoot, L"HEAD", beforePath);
+    case WM_NOTIFY: {
+        auto* header = reinterpret_cast<NMHDR*>(lParam);
+        if (state != nullptr && header != nullptr && header->hwndFrom == state->commitList) {
+            if (header->code == LVN_ITEMCHANGED) {
+                const int count = ListView_GetItemCount(state->commitList);
+                for (int i = 0; i < count && i < static_cast<int>(state->checked.size()); ++i) {
+                    state->checked[i] = ListView_GetCheckState(state->commitList, i) != FALSE;
                 }
-                if (diff.status != L'D') {
-                    const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
-                    afterContent = GitRunner::ReadWorkingTreeFile((repoRootPath / std::filesystem::path(afterPath)).wstring());
-                }
-
-                ShowDiffWindow(
-                    hwnd,
-                    L"Diff - " + BuildCommitFileLabel(diff),
-                    beforeContent,
-                    afterContent,
-                    state->uiFont,
-                    state->codeFont);
+                UpdateSquashComposeOkState(state);
+                return 0;
             }
+            if (header->code == NM_CUSTOMDRAW) {
+                auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    draw->clrText = DarkTheme::TextColor();
+                    draw->clrTextBk = DarkTheme::ControlBackground();
+                    return CDRF_DODEFAULT;
+                }
+            }
+        }
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == 4403 && state != nullptr) {
+            const int count = ListView_GetItemCount(state->commitList);
+            bool shouldSelectAll = false;
+            for (int i = 0; i < count; ++i) {
+                if (!ListView_GetCheckState(state->commitList, i)) {
+                    shouldSelectAll = true;
+                    break;
+                }
+            }
+            for (int i = 0; i < count; ++i) {
+                ListView_SetCheckState(state->commitList, i, shouldSelectAll ? TRUE : FALSE);
+                if (i < static_cast<int>(state->checked.size())) {
+                    state->checked[i] = shouldSelectAll;
+                }
+            }
+            UpdateSquashComposeOkState(state);
             return 0;
         }
         if (LOWORD(wParam) == IDOK && state != nullptr) {
@@ -1004,35 +1477,6 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
         break;
-    case WM_DRAWITEM: {
-        const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
-        if (state != nullptr && dis != nullptr && dis->hwndItem == state->fileList) {
-            RECT rect = dis->rcItem;
-            const bool selected = (dis->itemState & ODS_SELECTED) != 0;
-            HBRUSH brush = CreateSolidBrush(selected ? DarkTheme::AccentBackground() : DarkTheme::ControlBackground());
-            FillRect(dis->hDC, &rect, brush);
-            DeleteObject(brush);
-            if (dis->itemID != static_cast<UINT>(-1) && dis->itemID < state->diffs.size()) {
-                SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, GetCommitStatusColor(state->diffs[dis->itemID].status));
-                HGDIOBJ oldFont = SelectObject(dis->hDC, state->uiFont);
-                rect.left += 14;
-                DrawTextW(dis->hDC, BuildCommitFileLabel(state->diffs[dis->itemID]).c_str(), -1,
-                          &rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
-                SelectObject(dis->hDC, oldFont);
-            }
-            return TRUE;
-        }
-        break;
-    }
-    case WM_MEASUREITEM: {
-        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
-        if (state != nullptr && mis != nullptr && mis->CtlType == ODT_LISTBOX) {
-            mis->itemHeight = 32;
-            return TRUE;
-        }
-        break;
-    }
     case WM_CTLCOLORBTN:
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORLISTBOX: {
@@ -1398,6 +1842,15 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     composeClass.lpszClassName = kCommitComposeWindowClass;
     RegisterClassExW(&composeClass);
 
+    WNDCLASSEXW squashClass{};
+    squashClass.cbSize = sizeof(squashClass);
+    squashClass.lpfnWndProc = SquashComposeWindowProc;
+    squashClass.hInstance = instance_;
+    squashClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    squashClass.hbrBackground = DarkTheme::WindowBrush();
+    squashClass.lpszClassName = kSquashComposeWindowClass;
+    RegisterClassExW(&squashClass);
+
     const int windowWidth = std::max(projectStore_.GetWindowWidth(), kMinWindowWidth);
     const int windowHeight = std::max(projectStore_.GetWindowHeight(), kMinWindowHeight);
     const RECT centeredRect = CalculateCenteredWindowRect(windowWidth, windowHeight);
@@ -1564,6 +2017,17 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
         return 0;
     }
 
+    for (const auto& preCommand : state->preCommands) {
+        state->result = GitRunner::RunGitCommand(state->repoPath, preCommand, state->cancelEvent);
+        if (!state->result.success || state->result.cancelled) {
+            if (!state->cleanupFilePath.empty()) {
+                DeleteFileW(state->cleanupFilePath.c_str());
+            }
+            PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state));
+            return 0;
+        }
+    }
+
     state->result = GitRunner::RunGitCommand(state->repoPath, state->args, state->cancelEvent);
     if (!state->cleanupFilePath.empty()) {
         DeleteFileW(state->cleanupFilePath.c_str());
@@ -1600,7 +2064,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         ClearLog();
         LoadProjectsIntoList();
-        RefreshCurrentRepository(false);
+        RefreshCurrentRepository();
         ShowControls();
         return 0;
     case WM_SIZE:
@@ -1652,7 +2116,6 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                             MB_ICONQUESTION | MB_YESNO) == IDYES) {
                         RunSimpleCommand(
                             {L"push", L"--set-upstream", L"origin", currentBranch},
-                            false,
                             true);
                         if (completedCancelEvent != nullptr && completedCancelEvent != currentCancelEvent_) {
                             state->cancelEvent = nullptr;
@@ -1665,9 +2128,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
             const std::wstring selectedPath = GetSelectedProjectPath();
             if (selectedPath == state->repoPath) {
-                if (state->refreshStatusAfter) {
-                    RefreshCurrentRepository(true);
-                } else if (state->refreshCommitsAfter) {
+                if (state->refreshCommitsAfter) {
                     RefreshCommitList();
                 }
             } else if (state->refreshCommitsAfter) {
@@ -1725,28 +2186,28 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             AddFolder();
             return 0;
         case IDC_BTN_STATUS:
-            RunSimpleCommand({L"status", L"--short", L"--branch"}, false, false);
-            return 0;
-        case IDC_BTN_ADD_ALL:
-            RunSimpleCommand({L"add", L"-A"}, false, true);
+            RunSimpleCommand({L"status", L"--short", L"--branch"}, false);
             return 0;
         case IDC_BTN_COMMIT:
             RunCommit();
             return 0;
         case IDC_BTN_PUSH:
-            RunSimpleCommand({L"push"}, false, true);
+            RunSimpleCommand({L"push"}, true);
             return 0;
         case IDC_BTN_PULL:
-            RunSimpleCommand({L"pull"}, false, true);
+            RunSimpleCommand({L"pull"}, true);
             return 0;
         case IDC_BTN_FETCH:
-            RunSimpleCommand({L"fetch", L"--all"}, false, true);
+            RunSimpleCommand({L"fetch", L"--all"}, true);
             return 0;
         case IDC_BTN_BRANCH:
             ShowBranchMenu();
             return 0;
         case IDC_BTN_REMOTE:
             ShowRemoteMenu();
+            return 0;
+        case IDC_BTN_OPEN_GITHUB:
+            OpenCurrentGitHubRepo();
             return 0;
         case IDC_BTN_STOP:
             if (commandRunning_ && currentCancelEvent_ != nullptr) {
@@ -1764,13 +2225,13 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             OpenSelectedInTerminal();
             return 0;
         case IDM_PROJECT_REFRESH:
-            RefreshCurrentRepository(true);
+            RefreshCurrentRepository();
             return 0;
         case IDM_PROJECT_GIT_INIT:
             RunGitInit(GetSelectedProjectPath());
             return 0;
         case IDM_REMOTE_SHOW:
-            RunSimpleCommand({L"remote", L"-v"}, false, false);
+            RunSimpleCommand({L"remote", L"-v"}, false);
             return 0;
         case IDM_REMOTE_SET_ORIGIN:
             HandleRemoteMenuCommand(LOWORD(wParam));
@@ -1782,6 +2243,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         default:
             if (LOWORD(wParam) == IDM_BRANCH_CREATE ||
+                LOWORD(wParam) == IDM_BRANCH_RENAME ||
+                LOWORD(wParam) == IDM_BRANCH_SQUASH ||
                 (LOWORD(wParam) >= IDM_BRANCH_BASE && LOWORD(wParam) < IDM_BRANCH_BASE + 200)) {
                 HandleBranchMenuCommand(LOWORD(wParam));
                 return 0;
@@ -1810,7 +2273,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (header->idFrom == IDC_LIST_PROJECTS && header->code == LVN_ITEMCHANGED) {
             auto* info = reinterpret_cast<NMLISTVIEW*>(lParam);
             if (!suppressProjectSelectionRefresh_ && (info->uNewState & LVIS_SELECTED) != 0) {
-                RefreshCurrentRepository(false);
+                RefreshCurrentRepository();
             }
             return 0;
         }
@@ -1938,8 +2401,6 @@ void MainWindow::CreateControls() {
 
     buttonStatus_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_STATUS), instance_, nullptr);
-    buttonAddAll_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_ADD_ALL), instance_, nullptr);
     buttonCommit_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_COMMIT), instance_, nullptr);
     buttonPush_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
@@ -1952,8 +2413,10 @@ void MainWindow::CreateControls() {
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_BRANCH), instance_, nullptr);
     buttonRemote_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_REMOTE), instance_, nullptr);
+    buttonOpenGitHub_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
+                                        0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_OPEN_GITHUB), instance_, nullptr);
     statusLabel_ = CreateWindowExW(0, L"STATIC", L"Ready", WS_CHILD,
-                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_STATIC_STATUS), instance_, nullptr);
+                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_STATIC_STATUS), instance_, nullptr);
     stopButton_ = CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | BS_OWNERDRAW,
                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_STOP), instance_, nullptr);
 
@@ -1985,24 +2448,25 @@ void MainWindow::CreateControls() {
 
     SetButtonText(IDC_BTN_ADD_FOLDER, IDS_BTN_ADD_FOLDER);
     SetButtonText(IDC_BTN_STATUS, IDS_BTN_STATUS);
-    SetButtonText(IDC_BTN_ADD_ALL, IDS_BTN_ADD_ALL);
     SetButtonText(IDC_BTN_COMMIT, IDS_BTN_COMMIT);
     SetButtonText(IDC_BTN_PUSH, IDS_BTN_PUSH);
     SetButtonText(IDC_BTN_PULL, IDS_BTN_PULL);
     SetButtonText(IDC_BTN_FETCH, IDS_BTN_FETCH);
     SetButtonText(IDC_BTN_BRANCH, IDS_BTN_BRANCH);
     SetButtonText(IDC_BTN_REMOTE, IDS_BTN_REMOTE);
+    SetWindowTextW(buttonOpenGitHub_, L"");
     SetWindowTextW(statusLabel_, L"Ready");
     SetWindowTextW(stopButton_, L"Stop");
     EnableWindow(stopButton_, FALSE);
     UpdateWindowTitle();
+    UpdateCommandButtonsEnabled(false);
 }
 
 void MainWindow::ShowControls() {
     HWND controls[] = {
         addFolderButton_, projectList_, commitList_, logEdit_, logScrollBar_,
-        buttonStatus_, buttonAddAll_, buttonCommit_, buttonPush_,
-        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_,
+        buttonStatus_, buttonCommit_, buttonPush_,
+        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_,
         statusLabel_, stopButton_
     };
     for (HWND control : controls) {
@@ -2016,18 +2480,27 @@ void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText)
     if (statusLabel_ != nullptr) {
         SetWindowTextW(statusLabel_, text.c_str());
     }
+    UpdateCommandButtonsEnabled(running);
+    if (stopButton_ != nullptr) {
+        EnableWindow(stopButton_, running ? TRUE : FALSE);
+    }
+}
 
+void MainWindow::UpdateCommandButtonsEnabled(bool running) {
+    const BOOL enabled = running ? FALSE : TRUE;
     HWND buttons[] = {
-        buttonStatus_, buttonAddAll_, buttonCommit_, buttonPush_,
+        buttonStatus_, buttonCommit_, buttonPush_,
         buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_
     };
     for (HWND button : buttons) {
         if (button != nullptr) {
-            EnableWindow(button, running ? FALSE : TRUE);
+            EnableWindow(button, enabled);
         }
     }
-    if (stopButton_ != nullptr) {
-        EnableWindow(stopButton_, running ? TRUE : FALSE);
+
+    if (buttonOpenGitHub_ != nullptr) {
+        const bool hasGitHubRemote = !running && !GetGitHubWebUrlForRepo(GetSelectedProjectPath()).empty();
+        EnableWindow(buttonOpenGitHub_, hasGitHubRemote ? TRUE : FALSE);
     }
 }
 
@@ -2046,11 +2519,13 @@ void MainWindow::LayoutControls(int width, int height) {
 
     const int buttonWidth = 92;
     const int buttonGap = 8;
-    HWND buttons[] = {buttonStatus_, buttonAddAll_, buttonCommit_, buttonPush_,
+    HWND buttons[] = {buttonStatus_, buttonCommit_, buttonPush_,
                       buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_};
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 7; ++i) {
         MoveWindow(buttons[i], rightX + i * (buttonWidth + buttonGap), kPadding, buttonWidth, 30, TRUE);
     }
+    const int iconButtonSize = 30;
+    MoveWindow(buttonOpenGitHub_, rightX + rightWidth - iconButtonSize, kPadding, iconButtonSize, iconButtonSize, TRUE);
 
     MoveWindow(commitList_, rightX, contentTop, rightWidth, paneHeight, TRUE);
     const int logTop = contentTop + paneHeight + splitGap;
@@ -2103,8 +2578,8 @@ void MainWindow::ApplyFonts() {
                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     g_menuFont = menuFont_;
     HWND controls[] = {addFolderButton_, commitList_, logEdit_, statusLabel_, stopButton_,
-                       buttonStatus_, buttonAddAll_, buttonCommit_, buttonPush_,
-                       buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_};
+                       buttonStatus_, buttonCommit_, buttonPush_,
+                       buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_};
     for (HWND control : controls) {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     }
@@ -2139,13 +2614,14 @@ void MainWindow::LoadProjectsIntoList() {
     suppressProjectSelectionRefresh_ = false;
 }
 
-void MainWindow::RefreshCurrentRepository(bool runStatusCommand) {
+void MainWindow::RefreshCurrentRepository() {
     const std::wstring path = GetSelectedProjectPath();
     if (path.empty()) {
         ListView_DeleteAllItems(commitList_);
         UpdateWindowTitle();
         ClearLog();
         currentProjectPath_.clear();
+        UpdateCommandButtonsEnabled(commandRunning_);
         return;
     }
 
@@ -2157,15 +2633,13 @@ void MainWindow::RefreshCurrentRepository(bool runStatusCommand) {
     projectStore_.SetLastProject(path);
     projectStore_.Save();
     UpdateWindowTitle();
+    UpdateCommandButtonsEnabled(commandRunning_);
 
     if (!GitRunner::IsGitRepository(path)) {
         ShowCommitPlaceholder(LoadStringResource(IDS_MSG_NOT_GIT_REPO_HINT));
         return;
     }
 
-    if (runStatusCommand) {
-        RunSimpleCommand({L"status", L"--short", L"--branch"});
-    }
     RefreshCommitList();
 }
 
@@ -2399,7 +2873,7 @@ void MainWindow::AddFolder() {
 
     LoadProjectsIntoList();
     SelectProjectByPath(repoPath);
-    RefreshCurrentRepository(false);
+    RefreshCurrentRepository();
 }
 
 void MainWindow::RemoveSelectedProject() {
@@ -2415,7 +2889,7 @@ void MainWindow::RemoveSelectedProject() {
     projectStore_.Save();
     cacheDatabase_.RemoveRepository(path);
     LoadProjectsIntoList();
-    RefreshCurrentRepository(false);
+    RefreshCurrentRepository();
 }
 
 void MainWindow::ShowProjectContextMenu(POINT screenPoint) {
@@ -2506,17 +2980,41 @@ void MainWindow::OpenSelectedInTerminal() {
     }
 }
 
+std::wstring MainWindow::GetGitHubWebUrlForRepo(const std::wstring& repoPath) const {
+    if (repoPath.empty() || !GitRunner::IsGitRepository(repoPath)) {
+        return L"";
+    }
+
+    const GitCommandResult result = GitRunner::RunGitCommand(repoPath, {L"remote", L"get-url", L"origin"});
+    if (!result.success) {
+        return L"";
+    }
+    return NormalizeGitHubRemoteUrl(result.output);
+}
+
+void MainWindow::OpenCurrentGitHubRepo() {
+    const std::wstring url = GetGitHubWebUrlForRepo(GetSelectedProjectPath());
+    if (url.empty()) {
+        MessageBoxW(hwnd_, L"The selected repository does not have a GitHub origin remote.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        UpdateCommandButtonsEnabled(commandRunning_);
+        return;
+    }
+
+    ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
 void MainWindow::StartAsyncGitCommand(
     const std::wstring& repoPath,
     const std::vector<std::wstring>& args,
-    bool refreshStatusAfter,
     bool refreshCommitsAfter,
-    const std::wstring& cleanupFilePath) {
+    const std::wstring& cleanupFilePath,
+    const std::vector<std::vector<std::wstring>>& preCommands) {
     auto* state = new AsyncGitCommandState();
     state->hwnd = hwnd_;
     state->repoPath = repoPath;
+    state->preCommands = preCommands;
     state->args = args;
-    state->refreshStatusAfter = refreshStatusAfter;
     state->refreshCommitsAfter = refreshCommitsAfter;
     state->cleanupFilePath = cleanupFilePath;
     state->cancelEvent = currentCancelEvent_;
@@ -2543,9 +3041,9 @@ void MainWindow::StartAsyncGitCommand(
 
 void MainWindow::RunSimpleCommand(
     const std::vector<std::wstring>& args,
-    bool refreshStatusAfter,
     bool refreshCommitsAfter,
-    const std::wstring& cleanupFilePath) {
+    const std::wstring& cleanupFilePath,
+    const std::vector<std::vector<std::wstring>>& preCommands) {
     const std::wstring path = GetSelectedProjectPath();
     if (path.empty()) {
         MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_SELECT_REPO).c_str(),
@@ -2568,7 +3066,7 @@ void MainWindow::RunSimpleCommand(
     }
     SetCommandUiState(true, L"Running...");
     AppendLog(L"Running git command in background...");
-    StartAsyncGitCommand(path, args, refreshStatusAfter, refreshCommitsAfter, cleanupFilePath);
+    StartAsyncGitCommand(path, args, refreshCommitsAfter, cleanupFilePath, preCommands);
 }
 
 void MainWindow::RunGitInit(const std::wstring& requestedPath) {
@@ -2634,7 +3132,7 @@ void MainWindow::RunGitInit(const std::wstring& requestedPath) {
         LoadProjectsIntoList();
     }
     SelectProjectByPath(repoPath);
-    RefreshCurrentRepository(false);
+    RefreshCurrentRepository();
     MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_INIT_SUCCESS).c_str(),
                 LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
 }
@@ -2642,12 +3140,18 @@ void MainWindow::RunGitInit(const std::wstring& requestedPath) {
 void MainWindow::RunCommit() {
     bool accepted = false;
     const std::wstring path = GetSelectedProjectPath();
-    const std::wstring message = Trim(PromptForCommitMessage(path, &accepted));
+    std::vector<std::wstring> selectedPaths;
+    const std::wstring message = Trim(PromptForCommitMessage(path, &selectedPaths, &accepted));
     if (!accepted) {
         return;
     }
     if (message.empty()) {
         MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMIT_EMPTY).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+        return;
+    }
+    if (selectedPaths.empty()) {
+        MessageBoxW(hwnd_, L"Select at least one file to commit.",
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
         return;
     }
@@ -2663,7 +3167,95 @@ void MainWindow::RunCommit() {
         output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
     }
 
-    RunSimpleCommand({L"commit", L"-F", tempFile}, false, true, tempFile);
+    std::vector<std::wstring> addCommand = {L"add", L"-A", L"--"};
+    addCommand.insert(addCommand.end(), selectedPaths.begin(), selectedPaths.end());
+    RunSimpleCommand({L"commit", L"-F", tempFile}, true, tempFile, {addCommand});
+}
+
+void MainWindow::RunSquashLocalCommits() {
+    const std::wstring path = GetSelectedProjectPath();
+    if (path.empty()) {
+        return;
+    }
+
+    auto commits = GitRunner::GetUnpushedCommits(path, 100);
+    if (commits.size() < 2) {
+        MessageBoxW(hwnd_, L"At least two local unpushed commits are required to squash.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    auto* state = new SquashComposeWindowState();
+    state->parent = hwnd_;
+    state->title = L"Squash Local Commits";
+    state->repoPath = path;
+    state->commits = std::move(commits);
+    state->uiFont = uiFont_;
+
+    RECT parentRect{};
+    GetWindowRect(hwnd_, &parentRect);
+    const int width = std::max(980, static_cast<int>((parentRect.right - parentRect.left) * 8 / 10));
+    const int height = std::max(620, static_cast<int>((parentRect.bottom - parentRect.top) * 8 / 10));
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(hwnd_, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kSquashComposeWindowClass,
+        state->title.c_str(),
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE | WS_THICKFRAME,
+        x, y, width, height,
+        nullptr, nullptr, instance_, state);
+    if (dialog == nullptr) {
+        EnableWindow(hwnd_, TRUE);
+        delete state;
+        return;
+    }
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool accepted = state->accepted;
+    const int selectedCount = state->selectedCount;
+    const std::wstring message = Trim(state->message);
+    delete state;
+
+    if (!accepted) {
+        return;
+    }
+    if (selectedCount < 2) {
+        MessageBoxW(hwnd_, L"Select at least two latest commits to squash.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+        return;
+    }
+    if (message.empty()) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMIT_EMPTY).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+        return;
+    }
+
+    wchar_t tempPath[MAX_PATH] = {};
+    wchar_t tempFile[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempPath);
+    GetTempFileNameW(tempPath, L"gcm", 0, tempFile);
+    const std::string utf8 = WideToUtf8(message);
+    {
+        std::ofstream output(tempFile, std::ios::binary | std::ios::trunc);
+        output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+    }
+
+    const std::wstring resetTarget = L"HEAD~" + std::to_wstring(selectedCount);
+    RunSimpleCommand(
+        {L"commit", L"-F", tempFile},
+        true,
+        tempFile,
+        {{L"reset", L"--soft", resetTarget}});
 }
 
 void MainWindow::ShowBranchMenu() {
@@ -2684,6 +3276,8 @@ void MainWindow::ShowBranchMenu() {
     const std::wstring currentBranch = GitRunner::GetCurrentBranch(path);
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_CREATE, L"+ Create Branch");
+    AppendMenuW(menu, MF_STRING, IDM_BRANCH_RENAME, L"Rename Current Branch");
+    AppendMenuW(menu, MF_STRING, IDM_BRANCH_SQUASH, L"Squash Local Commits");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     for (size_t i = 0; i < cachedBranches_.size(); ++i) {
         UINT flags = MF_STRING;
@@ -2701,19 +3295,46 @@ void MainWindow::ShowBranchMenu() {
 
 void MainWindow::HandleBranchMenuCommand(UINT commandId) {
     if (commandId == IDM_BRANCH_CREATE) {
-        const std::wstring branchName = Trim(PromptForText(IDS_MSG_BRANCH_TITLE, IDS_MSG_BRANCH_PROMPT));
+        bool accepted = false;
+        const std::wstring branchName = Trim(PromptForText(
+            IDS_MSG_BRANCH_TITLE, IDS_MSG_BRANCH_PROMPT, L"", false, &accepted));
+        if (!accepted) {
+            return;
+        }
         if (branchName.empty()) {
             MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_BRANCH_EMPTY).c_str(),
                         LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
             return;
         }
-        RunSimpleCommand({L"checkout", L"-b", branchName}, false, true);
+        RunSimpleCommand({L"checkout", L"-b", branchName}, true);
+        return;
+    }
+
+    if (commandId == IDM_BRANCH_RENAME) {
+        const std::wstring currentBranch = GitRunner::GetCurrentBranch(GetSelectedProjectPath());
+        bool accepted = false;
+        const std::wstring branchName = Trim(PromptForText(
+            IDS_MSG_BRANCH_TITLE, IDS_MSG_BRANCH_PROMPT, currentBranch, false, &accepted));
+        if (!accepted) {
+            return;
+        }
+        if (branchName.empty()) {
+            MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_BRANCH_EMPTY).c_str(),
+                        LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+            return;
+        }
+        RunSimpleCommand({L"branch", L"-m", branchName}, true);
+        return;
+    }
+
+    if (commandId == IDM_BRANCH_SQUASH) {
+        RunSquashLocalCommits();
         return;
     }
 
     const size_t index = commandId - IDM_BRANCH_BASE;
     if (index < cachedBranches_.size()) {
-        RunSimpleCommand({L"checkout", cachedBranches_[index]}, false, true);
+        RunSimpleCommand({L"checkout", cachedBranches_[index]}, true);
     }
 }
 
@@ -2729,7 +3350,12 @@ void MainWindow::ShowRemoteMenu() {
 }
 
 void MainWindow::HandleRemoteMenuCommand(UINT) {
-    const std::wstring remoteUrl = Trim(PromptForText(IDS_MSG_REMOTE_TITLE, IDS_MSG_REMOTE_PROMPT));
+    bool accepted = false;
+    const std::wstring remoteUrl = Trim(PromptForText(
+        IDS_MSG_REMOTE_TITLE, IDS_MSG_REMOTE_PROMPT, L"", false, &accepted));
+    if (!accepted) {
+        return;
+    }
     if (remoteUrl.empty()) {
         MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_REMOTE_EMPTY).c_str(),
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
@@ -2816,7 +3442,7 @@ void MainWindow::HandleCommitMenuCommand(UINT commandId) {
             output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
         }
 
-        RunSimpleCommand({L"commit", L"--amend", L"-F", tempFile}, false, true, tempFile);
+        RunSimpleCommand({L"commit", L"--amend", L"-F", tempFile}, true, tempFile);
         return;
     }
 
@@ -2829,12 +3455,12 @@ void MainWindow::HandleCommitMenuCommand(UINT commandId) {
         if (result != IDYES) {
             return;
         }
-        RunSimpleCommand({L"reset", L"--hard", hash}, false, true);
+        RunSimpleCommand({L"reset", L"--hard", hash}, true);
         return;
     }
 
     if (commandId == IDM_COMMIT_RESET_SOFT) {
-        RunSimpleCommand({L"reset", L"--soft", hash}, false, true);
+        RunSimpleCommand({L"reset", L"--soft", hash}, true);
     }
 }
 
@@ -2855,7 +3481,10 @@ void MainWindow::UpdateWindowTitle() {
     SetWindowTextW(hwnd_, title.c_str());
 }
 
-std::wstring MainWindow::PromptForCommitMessage(const std::wstring& repoPath, bool* accepted) {
+std::wstring MainWindow::PromptForCommitMessage(
+    const std::wstring& repoPath,
+    std::vector<std::wstring>* selectedPaths,
+    bool* accepted) {
     auto* state = new CommitComposeWindowState();
     state->parent = hwnd_;
     state->title = LoadStringResource(IDS_MSG_COMMIT_TITLE);
@@ -2898,8 +3527,12 @@ std::wstring MainWindow::PromptForCommitMessage(const std::wstring& repoPath, bo
 
     const bool wasAccepted = state->accepted;
     const std::wstring text = state->message;
+    const std::vector<std::wstring> paths = state->selectedPaths;
     if (accepted != nullptr) {
         *accepted = wasAccepted;
+    }
+    if (selectedPaths != nullptr) {
+        *selectedPaths = wasAccepted ? paths : std::vector<std::wstring>{};
     }
     delete state;
     return wasAccepted ? text : L"";

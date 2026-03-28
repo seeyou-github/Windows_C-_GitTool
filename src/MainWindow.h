@@ -32,7 +32,7 @@ private:
     void ScrollLogToPosition(int position);
     void ApplyFonts();
     void LoadProjectsIntoList();
-    void RefreshCurrentRepository(bool runStatusCommand);
+    void RefreshCurrentRepository();
     void RefreshCommitList();
     void PopulateCommitList(const std::vector<CommitInfo>& commits);
     void ShowCommitPlaceholder(const std::wstring& message);
@@ -51,29 +51,36 @@ private:
     void ShowCommitDetails();
     void OpenSelectedInExplorer();
     void OpenSelectedInTerminal();
+    void OpenCurrentGitHubRepo();
     void RunSimpleCommand(
         const std::vector<std::wstring>& args,
-        bool refreshStatusAfter = true,
         bool refreshCommitsAfter = true,
-        const std::wstring& cleanupFilePath = L"");
+        const std::wstring& cleanupFilePath = L"",
+        const std::vector<std::vector<std::wstring>>& preCommands = {});
     void StartAsyncGitCommand(
         const std::wstring& repoPath,
         const std::vector<std::wstring>& args,
-        bool refreshStatusAfter,
         bool refreshCommitsAfter,
-        const std::wstring& cleanupFilePath);
+        const std::wstring& cleanupFilePath,
+        const std::vector<std::vector<std::wstring>>& preCommands = {});
     void RunGitInit(const std::wstring& repoPath = L"");
     void RunCommit();
+    void RunSquashLocalCommits();
     void ShowBranchMenu();
     void HandleBranchMenuCommand(UINT commandId);
     void ShowRemoteMenu();
     void HandleRemoteMenuCommand(UINT commandId);
     void HandleCommitMenuCommand(UINT commandId);
     bool CanEditSelectedCommitMessage() const;
-    std::wstring PromptForCommitMessage(const std::wstring& repoPath, bool* accepted);
+    std::wstring PromptForCommitMessage(
+        const std::wstring& repoPath,
+        std::vector<std::wstring>* selectedPaths,
+        bool* accepted);
     void SetButtonText(int controlId, int stringId);
     void SetWindowTextFromString(int stringId);
     void UpdateWindowTitle();
+    void UpdateCommandButtonsEnabled(bool running);
+    std::wstring GetGitHubWebUrlForRepo(const std::wstring& repoPath) const;
     std::wstring PromptForText(
         int titleId,
         int promptId,
@@ -95,13 +102,13 @@ private:
     HWND logEdit_ = nullptr;
     HWND logScrollBar_ = nullptr;
     HWND buttonStatus_ = nullptr;
-    HWND buttonAddAll_ = nullptr;
     HWND buttonCommit_ = nullptr;
     HWND buttonPush_ = nullptr;
     HWND buttonPull_ = nullptr;
     HWND buttonFetch_ = nullptr;
     HWND buttonBranch_ = nullptr;
     HWND buttonRemote_ = nullptr;
+    HWND buttonOpenGitHub_ = nullptr;
     HWND statusLabel_ = nullptr;
     HWND stopButton_ = nullptr;
     HFONT uiFont_ = nullptr;

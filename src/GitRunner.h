@@ -41,6 +41,9 @@ public:
     static std::vector<CommitInfo> GetRecentCommits(
         const std::wstring& repoPath,
         int limit);
+    static std::vector<CommitInfo> GetUnpushedCommits(
+        const std::wstring& repoPath,
+        int limit);
 
     static std::vector<std::wstring> GetLocalBranches(const std::wstring& repoPath);
     static std::wstring GetCurrentBranch(const std::wstring& repoPath);
