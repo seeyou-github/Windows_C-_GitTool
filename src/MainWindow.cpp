@@ -2205,8 +2205,8 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = DarkTheme::WindowBrush();
     wc.lpszClassName = kMainWindowClass;
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hIconSm = wc.hIcon;
+    wc.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
     RegisterClassExW(&wc);
 
     WNDCLASSEXW scrollClass{};
@@ -2292,6 +2292,15 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
 
     if (hwnd_ == nullptr) {
         return false;
+    }
+
+    HICON largeIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+    HICON smallIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+    if (largeIcon != nullptr) {
+        SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon));
+    }
+    if (smallIcon != nullptr) {
+        SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
     }
 
     PrepareInitialShow();
@@ -4339,12 +4348,7 @@ void MainWindow::SetWindowTextFromString(int stringId) {
 }
 
 void MainWindow::UpdateWindowTitle() {
-    std::wstring title = LoadStringResource(IDS_APP_TITLE);
-    const std::wstring path = GetSelectedProjectPath();
-    if (!path.empty()) {
-        title += L" - " + BaseNameFromPath(path);
-    }
-    SetWindowTextW(hwnd_, title.c_str());
+    SetWindowTextW(hwnd_, LoadStringResource(IDS_APP_TITLE).c_str());
 }
 
 std::wstring MainWindow::PromptForCommitMessage(
