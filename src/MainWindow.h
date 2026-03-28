@@ -27,6 +27,7 @@ private:
     void ShowControls();
     void LayoutControls(int width, int height);
     void SetCommandUiState(bool running, const std::wstring& statusText = L"");
+    void RefreshStatusLabelVisual();
     void UpdateProjectListColumnWidth(int listWidth);
     void UpdateCommitListColumnWidths(int listWidth);
     void UpdateLogScrollBar();
@@ -145,4 +146,7 @@ private:
     std::wstring baseStatusText_ = L"Ready";
     bool cloneProgressEnabled_ = false;
     bool stopRequested_ = false;
+    RECT statusTextRect_{};
+    std::wstring paintedStatusText_ = L"Ready";
+    bool paintedStatusVisible_ = false;
 };

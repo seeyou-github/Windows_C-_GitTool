@@ -2696,9 +2696,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 stopRequested_ = true;
                 SetEvent(currentCancelEvent_);
                 baseStatusText_ = L"Stopping...";
-                if (statusLabel_ != nullptr) {
-                    SetWindowTextW(statusLabel_, baseStatusText_.c_str());
-                }
+                paintedStatusText_ = baseStatusText_;
+                paintedStatusVisible_ = true;
+                RefreshStatusLabelVisual();
             }
             return 0;
         case IDM_PROJECT_REMOVE:
@@ -2798,7 +2798,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORLISTBOX: {
         HDC dc = reinterpret_cast<HDC>(wParam);
+        const HWND control = reinterpret_cast<HWND>(lParam);
         SetTextColor(dc, DarkTheme::TextColor());
+        if (control == statusLabel_) {
+            SetBkColor(dc, DarkTheme::WindowBackground());
+            return reinterpret_cast<LRESULT>(DarkTheme::WindowBrush());
+        }
         SetBkColor(dc, DarkTheme::ControlBackground());
         return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
     }
@@ -2826,6 +2831,21 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         LineTo(dc, kLeftPanelWidth + kPadding, rect.bottom);
         SelectObject(dc, oldPen);
         DeleteObject(pen);
+
+        if (paintedStatusVisible_) {
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, DarkTheme::TextColor());
+            HGDIOBJ oldFont = nullptr;
+            if (uiFont_ != nullptr) {
+                oldFont = SelectObject(dc, uiFont_);
+            }
+            RECT textRect = statusTextRect_;
+            DrawTextW(dc, paintedStatusText_.c_str(), -1, &textRect,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont != nullptr) {
+                SelectObject(dc, oldFont);
+            }
+        }
 
         EndPaint(hwnd_, &ps);
         return 0;
@@ -2949,6 +2969,7 @@ void MainWindow::CreateControls() {
     SetButtonText(IDC_BTN_REMOTE, IDS_BTN_REMOTE);
     SetWindowTextW(buttonOpenGitHub_, L"");
     SetWindowTextW(statusLabel_, L"Ready");
+    ShowWindow(statusLabel_, SW_HIDE);
     SendMessageW(progressBar_, PBM_SETRANGE32, 0, 100);
     SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
     SendMessageW(progressBar_, PBM_SETBKCOLOR, 0, DarkTheme::WindowBackground());
@@ -2965,11 +2986,12 @@ void MainWindow::ShowControls() {
         addFolderButton_, cloneButton_, projectList_, commitList_, logEdit_, logScrollBar_,
         buttonStatus_, buttonCommit_, buttonPush_,
         buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_,
-        statusLabel_, stopButton_
+        stopButton_
     };
     for (HWND control : controls) {
         ShowWindow(control, SW_SHOW);
     }
+    ShowWindow(statusLabel_, SW_HIDE);
     ShowWindow(progressBar_, SW_HIDE);
     ShowScrollBar(logEdit_, SB_VERT, FALSE);
 }
@@ -2985,9 +3007,9 @@ void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText)
             ShowWindow(progressBar_, SW_HIDE);
         }
     }
-    if (statusLabel_ != nullptr) {
-        SetWindowTextW(statusLabel_, text.c_str());
-    }
+    paintedStatusText_ = text;
+    paintedStatusVisible_ = (text != L"Ready");
+    RefreshStatusLabelVisual();
     if (!running) {
         stopRequested_ = false;
         cloneProgressEnabled_ = false;
@@ -2997,6 +3019,14 @@ void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText)
     if (stopButton_ != nullptr) {
         EnableWindow(stopButton_, running ? TRUE : FALSE);
     }
+}
+
+void MainWindow::RefreshStatusLabelVisual() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    InvalidateRect(hwnd_, &statusTextRect_, TRUE);
+    RedrawWindow(hwnd_, &statusTextRect_, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
 }
 
 void MainWindow::UpdateCommandButtonsEnabled(bool running) {
@@ -3057,7 +3087,13 @@ void MainWindow::LayoutControls(int width, int height) {
     const int progressWidth = std::max(220, rightWidth / 2);
     const int progressHeight = 18;
     const int statusWidth = rightWidth - stopWidth - progressWidth - 24;
-    MoveWindow(statusLabel_, rightX, statusTop, std::max(120, statusWidth), kStatusBarHeight, TRUE);
+    statusTextRect_.left = rightX;
+    statusTextRect_.top = statusTop;
+    statusTextRect_.right = rightX + std::max(120, statusWidth);
+    statusTextRect_.bottom = statusTop + kStatusBarHeight;
+    MoveWindow(statusLabel_, statusTextRect_.left, statusTextRect_.top,
+               statusTextRect_.right - statusTextRect_.left,
+               statusTextRect_.bottom - statusTextRect_.top, TRUE);
     MoveWindow(progressBar_, rightX + std::max(120, statusWidth) + 12,
                statusTop + (kStatusBarHeight - progressHeight) / 2,
                progressWidth, progressHeight, TRUE);
@@ -3331,9 +3367,11 @@ void MainWindow::AppendCommandOutputChunk(const std::wstring& text) {
                 ShowWindow(progressBar_, SW_SHOW);
                 SendMessageW(progressBar_, PBM_SETPOS, percent, 0);
             }
-            if (!stopRequested_ && statusLabel_ != nullptr) {
+            if (!stopRequested_) {
                 std::wstring status = label + L" " + std::to_wstring(percent) + L"%";
-                SetWindowTextW(statusLabel_, status.c_str());
+                paintedStatusText_ = status;
+                paintedStatusVisible_ = true;
+                RefreshStatusLabelVisual();
             }
             return;
         }
@@ -3408,9 +3446,9 @@ void MainWindow::ResetGitProgress() {
         SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
         ShowWindow(progressBar_, SW_HIDE);
     }
-    if (statusLabel_ != nullptr) {
-        SetWindowTextW(statusLabel_, baseStatusText_.c_str());
-    }
+    paintedStatusText_ = baseStatusText_;
+    paintedStatusVisible_ = (baseStatusText_ != L"Ready");
+    RefreshStatusLabelVisual();
 }
 
 void MainWindow::AppendCommandResult(const GitCommandResult& result) {
