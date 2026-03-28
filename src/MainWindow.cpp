@@ -946,14 +946,6 @@ INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         SetDlgItemTextW(hwnd, 1001, state->prompt.c_str());
         SetDlgItemTextW(hwnd, 1002, state->text.c_str());
         SendDlgItemMessageW(hwnd, 1002, EM_SETLIMITTEXT, 8192, 0);
-        if (state->multiline) {
-            HWND edit = GetDlgItem(hwnd, 1002);
-            state->editProc = reinterpret_cast<WNDPROC>(
-                SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(PromptEditProc)));
-            SendMessageW(hwnd, DM_SETDEFID, 0, 0);
-            SetFocus(edit);
-            return FALSE;
-        }
         HWND parent = GetParent(hwnd);
         if (parent != nullptr) {
             RECT parentRect{};
@@ -965,6 +957,14 @@ INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
             const int x = parentRect.left + ((parentRect.right - parentRect.left) - dialogWidth) / 2;
             const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - dialogHeight) / 2;
             SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+        }
+        if (state->multiline) {
+            HWND edit = GetDlgItem(hwnd, 1002);
+            state->editProc = reinterpret_cast<WNDPROC>(
+                SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(PromptEditProc)));
+            SendMessageW(hwnd, DM_SETDEFID, 0, 0);
+            SetFocus(edit);
+            return FALSE;
         }
         return TRUE;
     }
@@ -2109,7 +2109,12 @@ void MainWindow::RunGitInit(const std::wstring& requestedPath) {
 }
 
 void MainWindow::RunCommit() {
-    const std::wstring message = Trim(PromptForText(IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT, L"", true));
+    bool accepted = false;
+    const std::wstring message = Trim(PromptForText(
+        IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT, L"", true, &accepted));
+    if (!accepted) {
+        return;
+    }
     if (message.empty()) {
         MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMIT_EMPTY).c_str(),
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
@@ -2258,8 +2263,12 @@ void MainWindow::HandleCommitMenuCommand(UINT commandId) {
         const std::wstring path = GetSelectedProjectPath();
         const GitCommandResult currentMessageResult = GitRunner::RunGitCommand(path, {L"log", L"-1", L"--format=%B", L"HEAD"});
         const std::wstring currentMessage = currentMessageResult.success ? Trim(currentMessageResult.output) : L"";
+        bool accepted = false;
         const std::wstring newMessage = PromptForText(
-            IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT, currentMessage, true);
+            IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT, currentMessage, true, &accepted);
+        if (!accepted) {
+            return;
+        }
         if (Trim(newMessage).empty()) {
             MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMIT_EMPTY).c_str(),
                         LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
@@ -2319,7 +2328,12 @@ void MainWindow::UpdateWindowTitle() {
     SetWindowTextW(hwnd_, title.c_str());
 }
 
-std::wstring MainWindow::PromptForText(int titleId, int promptId, const std::wstring& initialValue, bool multiline) {
+std::wstring MainWindow::PromptForText(
+    int titleId,
+    int promptId,
+    const std::wstring& initialValue,
+    bool multiline,
+    bool* accepted) {
     PromptDialogState state;
     state.title = LoadStringResource(titleId);
     state.prompt = LoadStringResource(promptId);
@@ -2329,6 +2343,9 @@ std::wstring MainWindow::PromptForText(int titleId, int promptId, const std::wst
     std::vector<BYTE> dialogTemplate = BuildPromptDialogTemplate(multiline);
     DialogBoxIndirectParamW(instance_, reinterpret_cast<DLGTEMPLATE*>(dialogTemplate.data()),
                             hwnd_, PromptDialogProc, reinterpret_cast<LPARAM>(&state));
+    if (accepted != nullptr) {
+        *accepted = state.accepted;
+    }
     return state.accepted ? state.text : L"";
 }
 

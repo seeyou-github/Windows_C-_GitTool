@@ -57,7 +57,12 @@ private:
     void SetButtonText(int controlId, int stringId);
     void SetWindowTextFromString(int stringId);
     void UpdateWindowTitle();
-    std::wstring PromptForText(int titleId, int promptId, const std::wstring& initialValue = L"", bool multiline = false);
+    std::wstring PromptForText(
+        int titleId,
+        int promptId,
+        const std::wstring& initialValue = L"",
+        bool multiline = false,
+        bool* accepted = nullptr);
     std::wstring LoadStringResource(int resourceId) const;
     std::wstring GetExecutableDirectory() const;
     RECT CalculateCenteredWindowRect(int width, int height) const;
