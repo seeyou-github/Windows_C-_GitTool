@@ -243,13 +243,26 @@ struct PromptDialogState {
 INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<PromptDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (message) {
-    case WM_INITDIALOG:
+    case WM_INITDIALOG: {
         state = reinterpret_cast<PromptDialogState*>(lParam);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         SetWindowTextW(hwnd, state->title.c_str());
         SetDlgItemTextW(hwnd, 1001, state->prompt.c_str());
         SetDlgItemTextW(hwnd, 1002, state->text.c_str());
+        HWND parent = GetParent(hwnd);
+        if (parent != nullptr) {
+            RECT parentRect{};
+            RECT dialogRect{};
+            GetWindowRect(parent, &parentRect);
+            GetWindowRect(hwnd, &dialogRect);
+            const int dialogWidth = dialogRect.right - dialogRect.left;
+            const int dialogHeight = dialogRect.bottom - dialogRect.top;
+            const int x = parentRect.left + ((parentRect.right - parentRect.left) - dialogWidth) / 2;
+            const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - dialogHeight) / 2;
+            SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+        }
         return TRUE;
+    }
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK && state != nullptr) {
             wchar_t buffer[1024] = {};
@@ -399,9 +412,13 @@ LRESULT CALLBACK MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, 
 LRESULT CALLBACK MainWindow::LogEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(GetParent(hwnd), GWLP_USERDATA));
     if (self != nullptr && self->defaultLogEditProc_ != nullptr) {
+        if (message == WM_MOUSEWHEEL) {
+            const LRESULT result = CallWindowProcW(self->defaultLogEditProc_, hwnd, message, wParam, lParam);
+            self->UpdateLogScrollBar();
+            return result;
+        }
         const LRESULT result = CallWindowProcW(self->defaultLogEditProc_, hwnd, message, wParam, lParam);
         switch (message) {
-        case WM_MOUSEWHEEL:
         case WM_KEYDOWN:
         case WM_KEYUP:
         case WM_LBUTTONUP:
@@ -754,7 +771,7 @@ void MainWindow::CreateControls() {
                                   WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_LIST_COMMITS), instance_, nullptr);
     logEdit_ = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
-                               WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+                               WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                                0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_EDIT_LOG), instance_, nullptr);
     logScrollBar_ = CreateWindowExW(0, kDarkScrollBarClass, L"",
                                     WS_CHILD,
@@ -802,6 +819,7 @@ void MainWindow::CreateControls() {
     defaultLogEditProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
         logEdit_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(MainWindow::LogEditProc)));
     SendMessageW(logEdit_, EM_SETBKGNDCOLOR, 0, DarkTheme::ControlBackground());
+    ShowScrollBar(logEdit_, SB_VERT, FALSE);
 
     SetButtonText(IDC_BTN_ADD_FOLDER, IDS_BTN_ADD_FOLDER);
     SetButtonText(IDC_BTN_STATUS, IDS_BTN_STATUS);
@@ -824,6 +842,7 @@ void MainWindow::ShowControls() {
     for (HWND control : controls) {
         ShowWindow(control, SW_SHOW);
     }
+    ShowScrollBar(logEdit_, SB_VERT, FALSE);
 }
 
 void MainWindow::LayoutControls(int width, int height) {
@@ -863,6 +882,7 @@ void MainWindow::UpdateLogScrollBar() {
     if (logEdit_ == nullptr || logScrollBar_ == nullptr) {
         return;
     }
+    ShowScrollBar(logEdit_, SB_VERT, FALSE);
     InvalidateRect(logScrollBar_, nullptr, TRUE);
 }
 
@@ -1021,6 +1041,7 @@ void MainWindow::AppendLogRichText(const std::wstring& text, COLORREF color) {
     format.crTextColor = color;
     SendMessageW(logEdit_, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
     SendMessageW(logEdit_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+    SendMessageW(logEdit_, WM_VSCROLL, MAKEWPARAM(SB_BOTTOM, 0), 0);
     SendMessageW(logEdit_, EM_SCROLLCARET, 0, 0);
     UpdateLogScrollBar();
 }
