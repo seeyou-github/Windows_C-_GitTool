@@ -43,7 +43,8 @@ public:
 
     static std::vector<CommitInfo> GetRecentCommits(
         const std::wstring& repoPath,
-        int limit);
+        int limit,
+        HANDLE cancelEvent = nullptr);
     static std::vector<CommitInfo> GetUnpushedCommits(
         const std::wstring& repoPath,
         int limit);

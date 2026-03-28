@@ -35,6 +35,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
 
     MainWindow window;
     if (!window.Create(instance, nCmdShow)) {
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        CloseHandle(singleInstanceMutex);
         return 1;
     }
 

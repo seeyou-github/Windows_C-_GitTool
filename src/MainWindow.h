@@ -100,6 +100,7 @@ private:
     void PrepareInitialShow();
     void FinalizeInitialShow(int nCmdShow);
     void PersistWindowSize();
+    void StopAsyncWork();
 
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -117,7 +118,6 @@ private:
     HWND buttonBranch_ = nullptr;
     HWND buttonRemote_ = nullptr;
     HWND buttonOpenGitHub_ = nullptr;
-    HWND statusLabel_ = nullptr;
     HWND stopButton_ = nullptr;
     HWND progressBar_ = nullptr;
     HFONT uiFont_ = nullptr;
@@ -137,6 +137,9 @@ private:
     bool initialShowPrepared_ = false;
     bool suppressProjectSelectionRefresh_ = false;
     HANDLE currentCancelEvent_ = nullptr;
+    HANDLE currentCommandThread_ = nullptr;
+    HANDLE currentCommitRefreshThread_ = nullptr;
+    HANDLE currentCommitRefreshCancelEvent_ = nullptr;
     unsigned long long commitRefreshToken_ = 0;
     std::wstring currentProjectPath_;
     COLORREF currentCommandOutputColor_ = RGB(170, 176, 184);

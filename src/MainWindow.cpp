@@ -507,17 +507,18 @@ struct AsyncGitCommandState {
     GitCommandResult result;
 };
 
+struct AsyncGitOutputState {
+    std::wstring text;
+};
+
 struct AsyncCommitRefreshState {
     HWND hwnd = nullptr;
     std::wstring repoPath;
     int limit = 50;
     unsigned long long token = 0;
+    HANDLE cancelEvent = nullptr;
     std::vector<CommitInfo> previousCommits;
     std::vector<CommitInfo> commits;
-};
-
-struct AsyncGitOutputState {
-    std::wstring text;
 };
 
 struct DiffContentWindowState {
@@ -2456,7 +2457,9 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
         }
         auto* outputState = new AsyncGitOutputState();
         outputState->text.swap(pendingOutput);
-        PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_OUTPUT, 0, reinterpret_cast<LPARAM>(outputState));
+        if (!PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_OUTPUT, 0, reinterpret_cast<LPARAM>(outputState))) {
+            delete outputState;
+        }
     };
 
     auto postOutput = [&](const std::wstring& text) {
@@ -2475,7 +2478,9 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
             if (!state->cleanupFilePath.empty()) {
                 DeleteFileW(state->cleanupFilePath.c_str());
             }
-            PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state));
+            if (!PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state))) {
+                delete state;
+            }
             return 0;
         }
     }
@@ -2485,7 +2490,9 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
     if (!state->cleanupFilePath.empty()) {
         DeleteFileW(state->cleanupFilePath.c_str());
     }
-    PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state));
+    if (!PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state))) {
+        delete state;
+    }
     return 0;
 }
 
@@ -2497,10 +2504,18 @@ DWORD WINAPI MainWindow::AsyncCommitRefreshThread(LPVOID param) {
 
     MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(state->hwnd, GWLP_USERDATA));
     if (self != nullptr) {
-        state->commits = GitRunner::GetRecentCommits(state->repoPath, state->limit);
-        self->cacheDatabase_.PutCommitList(state->repoPath, state->commits);
+        state->commits = GitRunner::GetRecentCommits(state->repoPath, state->limit, state->cancelEvent);
+        if (state->cancelEvent == nullptr || WaitForSingleObject(state->cancelEvent, 0) != WAIT_OBJECT_0) {
+            self->cacheDatabase_.PutCommitList(state->repoPath, state->commits);
+        }
     }
-    PostMessageW(state->hwnd, WM_APP_COMMITS_REFRESH_DONE, 0, reinterpret_cast<LPARAM>(state));
+    if (!PostMessageW(state->hwnd, WM_APP_COMMITS_REFRESH_DONE, 0, reinterpret_cast<LPARAM>(state))) {
+        if (state->cancelEvent != nullptr) {
+            CloseHandle(state->cancelEvent);
+            state->cancelEvent = nullptr;
+        }
+        delete state;
+    }
     return 0;
 }
 
@@ -2526,6 +2541,20 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_APP_COMMITS_REFRESH_DONE: {
         auto* state = reinterpret_cast<AsyncCommitRefreshState*>(lParam);
         if (state != nullptr) {
+            const HANDLE completedCancelEvent = state->cancelEvent;
+            if (currentCommitRefreshThread_ != nullptr &&
+                completedCancelEvent != nullptr &&
+                completedCancelEvent == currentCommitRefreshCancelEvent_) {
+                CloseHandle(currentCommitRefreshThread_);
+                currentCommitRefreshThread_ = nullptr;
+            }
+            if (completedCancelEvent != nullptr) {
+                if (completedCancelEvent == currentCommitRefreshCancelEvent_) {
+                    currentCommitRefreshCancelEvent_ = nullptr;
+                }
+                CloseHandle(completedCancelEvent);
+                state->cancelEvent = nullptr;
+            }
             if (state->token == commitRefreshToken_ && state->repoPath == GetSelectedProjectPath()) {
                 if (!CommitRepository::AreCommitListsEqual(state->previousCommits, state->commits)) {
                     PopulateCommitList(state->commits);
@@ -2551,6 +2580,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         auto* state = reinterpret_cast<AsyncGitCommandState*>(lParam);
         if (state != nullptr) {
             commandRunning_ = false;
+            if (currentCommandThread_ != nullptr) {
+                CloseHandle(currentCommandThread_);
+                currentCommandThread_ = nullptr;
+            }
             HANDLE completedCancelEvent = state->cancelEvent;
             if (currentCancelEvent_ != nullptr) {
                 CloseHandle(currentCancelEvent_);
@@ -2807,12 +2840,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORLISTBOX: {
         HDC dc = reinterpret_cast<HDC>(wParam);
-        const HWND control = reinterpret_cast<HWND>(lParam);
         SetTextColor(dc, DarkTheme::TextColor());
-        if (control == statusLabel_) {
-            SetBkColor(dc, DarkTheme::WindowBackground());
-            return reinterpret_cast<LRESULT>(DarkTheme::WindowBrush());
-        }
         SetBkColor(dc, DarkTheme::ControlBackground());
         return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
     }
@@ -2862,10 +2890,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY:
         PersistWindowSize();
         projectStore_.Save();
-        if (currentCancelEvent_ != nullptr) {
-            CloseHandle(currentCancelEvent_);
-            currentCancelEvent_ = nullptr;
-        }
+        StopAsyncWork();
         if (commitContextMenu_ != nullptr) {
             DestroyMenu(commitContextMenu_);
             commitContextMenu_ = nullptr;
@@ -2934,8 +2959,6 @@ void MainWindow::CreateControls() {
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_REMOTE), instance_, nullptr);
     buttonOpenGitHub_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
                                         0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_OPEN_GITHUB), instance_, nullptr);
-    statusLabel_ = CreateWindowExW(0, L"STATIC", L"Ready", WS_CHILD,
-                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_STATIC_STATUS), instance_, nullptr);
     progressBar_ = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD,
                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_PROGRESS_GIT), instance_, nullptr);
     stopButton_ = CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | BS_OWNERDRAW,
@@ -2977,8 +3000,6 @@ void MainWindow::CreateControls() {
     SetButtonText(IDC_BTN_BRANCH, IDS_BTN_BRANCH);
     SetButtonText(IDC_BTN_REMOTE, IDS_BTN_REMOTE);
     SetWindowTextW(buttonOpenGitHub_, L"");
-    SetWindowTextW(statusLabel_, L"Ready");
-    ShowWindow(statusLabel_, SW_HIDE);
     SendMessageW(progressBar_, PBM_SETRANGE32, 0, 100);
     SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
     SendMessageW(progressBar_, PBM_SETBKCOLOR, 0, DarkTheme::WindowBackground());
@@ -3000,9 +3021,59 @@ void MainWindow::ShowControls() {
     for (HWND control : controls) {
         ShowWindow(control, SW_SHOW);
     }
-    ShowWindow(statusLabel_, SW_HIDE);
     ShowWindow(progressBar_, SW_HIDE);
     ShowScrollBar(logEdit_, SB_VERT, FALSE);
+}
+
+void MainWindow::StopAsyncWork() {
+    if (currentCommitRefreshCancelEvent_ != nullptr) {
+        SetEvent(currentCommitRefreshCancelEvent_);
+    }
+    if (currentCancelEvent_ != nullptr) {
+        SetEvent(currentCancelEvent_);
+    }
+    if (currentCommitRefreshThread_ != nullptr) {
+        WaitForSingleObject(currentCommitRefreshThread_, 5000);
+        CloseHandle(currentCommitRefreshThread_);
+        currentCommitRefreshThread_ = nullptr;
+    }
+    if (currentCommitRefreshCancelEvent_ != nullptr) {
+        CloseHandle(currentCommitRefreshCancelEvent_);
+        currentCommitRefreshCancelEvent_ = nullptr;
+    }
+    if (currentCommandThread_ != nullptr) {
+        WaitForSingleObject(currentCommandThread_, 5000);
+        CloseHandle(currentCommandThread_);
+        currentCommandThread_ = nullptr;
+    }
+    if (currentCancelEvent_ != nullptr) {
+        CloseHandle(currentCancelEvent_);
+        currentCancelEvent_ = nullptr;
+    }
+
+    MSG msg{};
+    while (PeekMessageW(&msg, hwnd_, WM_APP_GIT_COMMAND_DONE, WM_APP_GIT_COMMAND_OUTPUT, PM_REMOVE)) {
+        switch (msg.message) {
+        case WM_APP_GIT_COMMAND_DONE:
+            delete reinterpret_cast<AsyncGitCommandState*>(msg.lParam);
+            break;
+        case WM_APP_GIT_COMMAND_OUTPUT:
+            delete reinterpret_cast<AsyncGitOutputState*>(msg.lParam);
+            break;
+        case WM_APP_COMMITS_REFRESH_DONE: {
+            auto* state = reinterpret_cast<AsyncCommitRefreshState*>(msg.lParam);
+            if (state != nullptr) {
+                if (state->cancelEvent != nullptr) {
+                    CloseHandle(state->cancelEvent);
+                }
+                delete state;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
 }
 
 void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText) {
@@ -3100,9 +3171,6 @@ void MainWindow::LayoutControls(int width, int height) {
     statusTextRect_.top = statusTop;
     statusTextRect_.right = rightX + std::max(120, statusWidth);
     statusTextRect_.bottom = statusTop + kStatusBarHeight;
-    MoveWindow(statusLabel_, statusTextRect_.left, statusTextRect_.top,
-               statusTextRect_.right - statusTextRect_.left,
-               statusTextRect_.bottom - statusTextRect_.top, TRUE);
     MoveWindow(progressBar_, rightX + std::max(120, statusWidth) + 12,
                statusTop + (kStatusBarHeight - progressHeight) / 2,
                progressWidth, progressHeight, TRUE);
@@ -3164,7 +3232,7 @@ void MainWindow::ApplyFonts() {
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     g_menuFont = menuFont_;
-    HWND controls[] = {addFolderButton_, cloneButton_, commitList_, logEdit_, statusLabel_, stopButton_,
+    HWND controls[] = {addFolderButton_, cloneButton_, commitList_, logEdit_, stopButton_,
                        buttonStatus_, buttonCommit_, buttonPush_,
                        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_};
     for (HWND control : controls) {
@@ -3264,14 +3332,35 @@ void MainWindow::RefreshCommitList() {
     state->limit = 50;
     state->token = ++commitRefreshToken_;
     state->previousCommits = cachedCommits;
+    state->cancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (state->cancelEvent == nullptr) {
+        delete state;
+        return;
+    }
+
+    if (currentCommitRefreshCancelEvent_ != nullptr) {
+        SetEvent(currentCommitRefreshCancelEvent_);
+    }
+    if (currentCommitRefreshThread_ != nullptr) {
+        WaitForSingleObject(currentCommitRefreshThread_, 5000);
+        CloseHandle(currentCommitRefreshThread_);
+        currentCommitRefreshThread_ = nullptr;
+    }
+    if (currentCommitRefreshCancelEvent_ != nullptr) {
+        CloseHandle(currentCommitRefreshCancelEvent_);
+        currentCommitRefreshCancelEvent_ = nullptr;
+    }
+    currentCommitRefreshCancelEvent_ = state->cancelEvent;
 
     const HANDLE thread = CreateThread(
         nullptr, 0, MainWindow::AsyncCommitRefreshThread, state, 0, nullptr);
     if (thread == nullptr) {
+        CloseHandle(state->cancelEvent);
         delete state;
+        currentCommitRefreshCancelEvent_ = nullptr;
         return;
     }
-    CloseHandle(thread);
+    currentCommitRefreshThread_ = thread;
 }
 
 void MainWindow::PopulateCommitList(const std::vector<CommitInfo>& commits) {
@@ -3715,7 +3804,7 @@ void MainWindow::StartAsyncGitCommand(
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONERROR);
         return;
     }
-    CloseHandle(thread);
+    currentCommandThread_ = thread;
 }
 
 void MainWindow::RunSimpleCommand(
@@ -3916,7 +4005,7 @@ void MainWindow::RunClone() {
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONERROR);
         return;
     }
-    CloseHandle(thread);
+    currentCommandThread_ = thread;
 }
 
 void MainWindow::RunCommit() {

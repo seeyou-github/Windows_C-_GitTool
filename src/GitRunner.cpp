@@ -55,6 +55,57 @@ std::wstring Utf8ToWide(const std::string& text) {
     return wide;
 }
 
+bool DecodeUtf8Prefix(std::string& pendingBytes, std::wstring* decodedText) {
+    if (decodedText == nullptr || pendingBytes.empty()) {
+        return false;
+    }
+
+    const size_t maxTrim = std::min<size_t>(3, pendingBytes.size());
+    for (size_t trim = 0; trim <= maxTrim; ++trim) {
+        const int byteCount = static_cast<int>(pendingBytes.size() - trim);
+        if (byteCount <= 0) {
+            continue;
+        }
+        const int size = MultiByteToWideChar(CP_UTF8, 0, pendingBytes.data(), byteCount, nullptr, 0);
+        if (size <= 0) {
+            continue;
+        }
+
+        std::wstring wide(size, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, pendingBytes.data(), byteCount, wide.data(), size);
+        decodedText->swap(wide);
+        pendingBytes.erase(0, byteCount);
+        return true;
+    }
+
+    if (pendingBytes.size() > 4) {
+        *decodedText = Utf8ToWide(pendingBytes);
+        pendingBytes.clear();
+        return !decodedText->empty();
+    }
+    return false;
+}
+
+HANDLE CreateKillOnCloseJobObject() {
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job == nullptr) {
+        return nullptr;
+    }
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits,
+            sizeof(limits))) {
+        CloseHandle(job);
+        return nullptr;
+    }
+
+    return job;
+}
+
 std::wstring ReadFileToWide(const std::wstring& filePath) {
     std::ifstream input(filePath.c_str(), std::ios::binary);
     if (!input.is_open()) {
@@ -166,7 +217,16 @@ GitCommandResult GitRunner::RunGitCommand(
         return result;
     }
 
+    HANDLE job = CreateKillOnCloseJobObject();
+    if (job != nullptr) {
+        if (!AssignProcessToJobObject(job, pi.hProcess)) {
+            CloseHandle(job);
+            job = nullptr;
+        }
+    }
+
     std::string outputBuffer;
+    std::string pendingUtf8Bytes;
     char temp[4096];
     bool processFinished = false;
     while (!processFinished) {
@@ -177,15 +237,24 @@ GitCommandResult GitRunner::RunGitCommand(
             if (ReadFile(readPipe, temp, toRead, &bytesRead, nullptr) && bytesRead > 0) {
                 outputBuffer.append(temp, temp + bytesRead);
                 if (outputCallback) {
-                    outputCallback(Utf8ToWide(std::string(temp, temp + bytesRead)));
-                    result.outputStreamed = true;
+                    pendingUtf8Bytes.append(temp, temp + bytesRead);
+                    std::wstring decodedChunk;
+                    while (DecodeUtf8Prefix(pendingUtf8Bytes, &decodedChunk)) {
+                        outputCallback(decodedChunk);
+                        result.outputStreamed = true;
+                        decodedChunk.clear();
+                    }
                 }
             }
             continue;
         }
 
         if (cancelEvent != nullptr && WaitForSingleObject(cancelEvent, 0) == WAIT_OBJECT_0) {
-            TerminateProcess(pi.hProcess, 1);
+            if (job != nullptr) {
+                TerminateJobObject(job, 1);
+            } else {
+                TerminateProcess(pi.hProcess, 1);
+            }
             result.cancelled = true;
             break;
         }
@@ -198,9 +267,19 @@ GitCommandResult GitRunner::RunGitCommand(
     while (ReadFile(readPipe, temp, sizeof(temp), &bytesRead, nullptr) && bytesRead > 0) {
         outputBuffer.append(temp, temp + bytesRead);
         if (outputCallback) {
-            outputCallback(Utf8ToWide(std::string(temp, temp + bytesRead)));
-            result.outputStreamed = true;
+            pendingUtf8Bytes.append(temp, temp + bytesRead);
+            std::wstring decodedChunk;
+            while (DecodeUtf8Prefix(pendingUtf8Bytes, &decodedChunk)) {
+                outputCallback(decodedChunk);
+                result.outputStreamed = true;
+                decodedChunk.clear();
+            }
         }
+    }
+    if (outputCallback && !pendingUtf8Bytes.empty()) {
+        outputCallback(Utf8ToWide(pendingUtf8Bytes));
+        result.outputStreamed = true;
+        pendingUtf8Bytes.clear();
     }
 
     DWORD exitCode = 1;
@@ -216,18 +295,22 @@ GitCommandResult GitRunner::RunGitCommand(
     }
 
     CloseHandle(readPipe);
+    if (job != nullptr) {
+        CloseHandle(job);
+    }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
     return result;
 }
 
-std::vector<CommitInfo> GitRunner::GetRecentCommits(const std::wstring& repoPath, int limit) {
+std::vector<CommitInfo> GitRunner::GetRecentCommits(const std::wstring& repoPath, int limit, HANDLE cancelEvent) {
     std::vector<CommitInfo> commits;
     const std::wstring format = L"%h%x1f%s%x1f%an%x1f%ad";
     const GitCommandResult result = RunGitCommand(
         repoPath,
-        {L"log", L"--date=short", L"--pretty=format:" + format, L"-n", std::to_wstring(limit)});
+        {L"log", L"--date=short", L"--pretty=format:" + format, L"-n", std::to_wstring(limit)},
+        cancelEvent);
     if (!result.success) {
         return commits;
     }
