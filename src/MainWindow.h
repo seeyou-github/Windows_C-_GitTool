@@ -42,6 +42,7 @@ private:
     void RemoveSelectedProject();
     void ShowProjectContextMenu(POINT screenPoint);
     void ShowCommitContextMenu(POINT screenPoint);
+    void ShowCommitDetails();
     void OpenSelectedInExplorer();
     void OpenSelectedInTerminal();
     void RunSimpleCommand(const std::vector<std::wstring>& args);
@@ -55,7 +56,7 @@ private:
     void SetButtonText(int controlId, int stringId);
     void SetWindowTextFromString(int stringId);
     void UpdateWindowTitle();
-    std::wstring PromptForText(int titleId, int promptId, const std::wstring& initialValue = L"");
+    std::wstring PromptForText(int titleId, int promptId, const std::wstring& initialValue = L"", bool multiline = false);
     std::wstring LoadStringResource(int resourceId) const;
     std::wstring GetExecutableDirectory() const;
     RECT CalculateCenteredWindowRect(int width, int height) const;

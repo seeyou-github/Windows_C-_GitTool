@@ -67,6 +67,16 @@ std::vector<std::wstring> SplitLines(const std::wstring& text) {
     return lines;
 }
 
+std::wstring TrimText(const std::wstring& value) {
+    const wchar_t* whitespace = L" \t\r\n";
+    const size_t begin = value.find_first_not_of(whitespace);
+    if (begin == std::wstring::npos) {
+        return L"";
+    }
+    const size_t end = value.find_last_not_of(whitespace);
+    return value.substr(begin, end - begin + 1);
+}
+
 }  // namespace
 
 bool GitRunner::IsGitRepository(const std::wstring& repoPath) {
@@ -203,4 +213,71 @@ std::wstring GitRunner::GetCurrentBranch(const std::wstring& repoPath) {
         }
     }
     return L"";
+}
+
+std::wstring GitRunner::GetCommitDetails(const std::wstring& repoPath, const std::wstring& commitHash) {
+    const GitCommandResult result = RunGitCommand(
+        repoPath,
+        {L"show", L"--date=format:%Y-%m-%d %H:%M:%S", L"--format=%H%x1f%cn%x1f%cd%x1f%B", L"--no-patch", commitHash});
+    return result.success ? result.output : result.output;
+}
+
+std::vector<CommitFileDiff> GitRunner::GetCommitFileDiffs(const std::wstring& repoPath, const std::wstring& commitHash) {
+    std::vector<CommitFileDiff> diffs;
+    const GitCommandResult namesResult = RunGitCommand(
+        repoPath,
+        {L"diff-tree", L"--no-commit-id", L"--find-renames", L"--name-status", L"-r", commitHash});
+    if (!namesResult.success) {
+        return diffs;
+    }
+
+    for (const std::wstring& line : SplitLines(namesResult.output)) {
+        if (line.empty()) {
+            continue;
+        }
+        CommitFileDiff diff;
+        diff.status = line[0];
+        const size_t firstTabPos = line.find(L'\t');
+        if (firstTabPos == std::wstring::npos) {
+            diff.path = TrimText(line.substr(1));
+            diff.oldPath = diff.path;
+            diff.newPath = diff.path;
+            diff.patchPath = diff.path;
+        } else if (diff.status == L'R') {
+            const size_t secondTabPos = line.find(L'\t', firstTabPos + 1);
+            const std::wstring oldPath = line.substr(firstTabPos + 1, secondTabPos - firstTabPos - 1);
+            const std::wstring newPath = secondTabPos == std::wstring::npos
+                ? oldPath
+                : line.substr(secondTabPos + 1);
+            diff.oldPath = oldPath;
+            diff.newPath = newPath;
+            diff.path = oldPath + L" -> " + newPath;
+            diff.patchPath = newPath;
+        } else {
+            diff.path = line.substr(firstTabPos + 1);
+            diff.oldPath = diff.path;
+            diff.newPath = diff.path;
+            diff.patchPath = diff.path;
+        }
+
+        const GitCommandResult patchResult = RunGitCommand(
+            repoPath, {L"show", L"--format=", commitHash, L"--", diff.patchPath});
+        diff.patch = patchResult.output;
+        diffs.push_back(diff);
+    }
+    return diffs;
+}
+
+std::wstring GitRunner::GetFileContentAtRevision(
+    const std::wstring& repoPath,
+    const std::wstring& revision,
+    const std::wstring& filePath) {
+    if (revision.empty() || filePath.empty()) {
+        return L"";
+    }
+
+    const GitCommandResult result = RunGitCommand(
+        repoPath,
+        {L"show", revision + L":" + filePath});
+    return result.success ? result.output : L"";
 }

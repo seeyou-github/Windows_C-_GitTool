@@ -17,6 +17,15 @@ struct CommitInfo {
     std::wstring date;
 };
 
+struct CommitFileDiff {
+    wchar_t status = L'M';
+    std::wstring path;
+    std::wstring oldPath;
+    std::wstring newPath;
+    std::wstring patchPath;
+    std::wstring patch;
+};
+
 class GitRunner {
 public:
     static bool IsGitRepository(const std::wstring& repoPath);
@@ -31,4 +40,10 @@ public:
 
     static std::vector<std::wstring> GetLocalBranches(const std::wstring& repoPath);
     static std::wstring GetCurrentBranch(const std::wstring& repoPath);
+    static std::wstring GetCommitDetails(const std::wstring& repoPath, const std::wstring& commitHash);
+    static std::vector<CommitFileDiff> GetCommitFileDiffs(const std::wstring& repoPath, const std::wstring& commitHash);
+    static std::wstring GetFileContentAtRevision(
+        const std::wstring& repoPath,
+        const std::wstring& revision,
+        const std::wstring& filePath);
 };

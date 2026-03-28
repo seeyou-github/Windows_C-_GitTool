@@ -18,6 +18,8 @@ namespace {
 
 constexpr wchar_t kMainWindowClass[] = L"GitVisualToolMainWindow";
 constexpr wchar_t kDarkScrollBarClass[] = L"GitVisualToolDarkScrollBar";
+constexpr wchar_t kCommitDetailWindowClass[] = L"GitVisualToolCommitDetailWindow";
+constexpr wchar_t kDiffContentWindowClass[] = L"GitVisualToolDiffContentWindow";
 constexpr int kToolbarHeight = 44;
 constexpr int kPadding = 12;
 constexpr int kLeftPanelWidth = 380;
@@ -215,6 +217,17 @@ int GetVisibleLogLines(HWND edit, HFONT font) {
     return std::max(1, clientHeight / lineHeight);
 }
 
+std::string WideToUtf8(const std::wstring& text) {
+    if (text.empty()) {
+        return {};
+    }
+
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string utf8(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), utf8.data(), size, nullptr, nullptr);
+    return utf8;
+}
+
 void AddListViewRowsPadding(HWND listView, int count) {
     if (count <= 0) {
         return;
@@ -237,8 +250,676 @@ struct PromptDialogState {
     std::wstring title;
     std::wstring prompt;
     std::wstring text;
+    bool multiline = false;
     bool accepted = false;
 };
+
+struct DiffContentWindowState {
+    std::wstring title;
+    std::wstring beforeTitle;
+    std::wstring afterTitle;
+    std::wstring beforeContent;
+    std::wstring afterContent;
+    HWND beforeLabel = nullptr;
+    HWND afterLabel = nullptr;
+    HWND toggleButton = nullptr;
+    HWND beforeEdit = nullptr;
+    HWND afterEdit = nullptr;
+    HFONT uiFont = nullptr;
+    HFONT codeFont = nullptr;
+    WNDPROC beforeEditProc = nullptr;
+    WNDPROC afterEditProc = nullptr;
+    bool hideSame = false;
+    bool syncingScroll = false;
+};
+
+struct CommitDetailWindowState {
+    std::wstring repoPath;
+    std::wstring commitHash;
+    std::wstring title;
+    std::wstring summary;
+    std::vector<CommitFileDiff> diffs;
+    HWND summaryEdit = nullptr;
+    HWND fileList = nullptr;
+    HFONT uiFont = nullptr;
+    HFONT codeFont = nullptr;
+};
+
+COLORREF GetCommitStatusColor(wchar_t status) {
+    switch (status) {
+    case L'A':
+        return RGB(112, 196, 118);
+    case L'D':
+        return RGB(136, 142, 153);
+    case L'R':
+        return RGB(234, 176, 76);
+    case L'M':
+    default:
+        return RGB(224, 108, 117);
+    }
+}
+
+std::wstring BuildCommitFileLabel(const CommitFileDiff& diff) {
+    std::wstring label;
+    label += diff.status;
+    label += L"  ";
+    label += diff.path;
+    return label;
+}
+
+void ConfigureRichEditColors(HWND edit, HFONT font, COLORREF background, COLORREF textColor) {
+    if (edit == nullptr) {
+        return;
+    }
+
+    SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    SendMessageW(edit, EM_SETBKGNDCOLOR, 0, background);
+
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_COLOR;
+    format.crTextColor = textColor;
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_DEFAULT, reinterpret_cast<LPARAM>(&format));
+}
+
+struct DiffDisplayLine {
+    int beforeLineNumber = 0;
+    std::wstring beforeText;
+    COLORREF beforeTextColor = DarkTheme::TextColor();
+    COLORREF beforeBackground = DarkTheme::ControlBackground();
+    int afterLineNumber = 0;
+    std::wstring afterText;
+    COLORREF afterTextColor = DarkTheme::TextColor();
+    COLORREF afterBackground = DarkTheme::ControlBackground();
+    bool same = false;
+    bool placeholder = false;
+};
+
+std::vector<std::wstring> SplitTextLines(const std::wstring& text) {
+    std::vector<std::wstring> lines;
+    std::wstringstream stream(text);
+    std::wstring line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == L'\r') {
+            line.pop_back();
+        }
+        lines.push_back(line);
+    }
+    if (lines.empty() && !text.empty()) {
+        lines.push_back(text);
+    }
+    return lines;
+}
+
+std::vector<std::pair<int, int>> ComputeLineMatches(
+    const std::vector<std::wstring>& beforeLines,
+    const std::vector<std::wstring>& afterLines) {
+    const size_t beforeCount = beforeLines.size();
+    const size_t afterCount = afterLines.size();
+    if (beforeCount == 0 || afterCount == 0 || (beforeCount * afterCount) > 400000) {
+        return {};
+    }
+
+    std::vector<int> table((beforeCount + 1) * (afterCount + 1), 0);
+    auto at = [&](size_t i, size_t j) -> int& {
+        return table[i * (afterCount + 1) + j];
+    };
+
+    for (int i = static_cast<int>(beforeCount) - 1; i >= 0; --i) {
+        for (int j = static_cast<int>(afterCount) - 1; j >= 0; --j) {
+            if (beforeLines[static_cast<size_t>(i)] == afterLines[static_cast<size_t>(j)]) {
+                at(static_cast<size_t>(i), static_cast<size_t>(j)) = 1 + at(static_cast<size_t>(i + 1), static_cast<size_t>(j + 1));
+            } else {
+                at(static_cast<size_t>(i), static_cast<size_t>(j)) = std::max(
+                    at(static_cast<size_t>(i + 1), static_cast<size_t>(j)),
+                    at(static_cast<size_t>(i), static_cast<size_t>(j + 1)));
+            }
+        }
+    }
+
+    std::vector<std::pair<int, int>> matches;
+    size_t i = 0;
+    size_t j = 0;
+    while (i < beforeCount && j < afterCount) {
+        if (beforeLines[i] == afterLines[j]) {
+            matches.emplace_back(static_cast<int>(i), static_cast<int>(j));
+            ++i;
+            ++j;
+        } else if (at(i + 1, j) >= at(i, j + 1)) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return matches;
+}
+
+void AppendDiffChangedRows(
+    std::vector<DiffDisplayLine>& rows,
+    const std::vector<std::wstring>& beforeLines,
+    const std::vector<std::wstring>& afterLines,
+    int beforeStart,
+    int beforeEnd,
+    int afterStart,
+    int afterEnd) {
+    const int span = std::max(beforeEnd - beforeStart, afterEnd - afterStart);
+    for (int i = 0; i < span; ++i) {
+        DiffDisplayLine row;
+        const bool hasBefore = (beforeStart + i) < beforeEnd;
+        const bool hasAfter = (afterStart + i) < afterEnd;
+
+        if (hasBefore) {
+            row.beforeLineNumber = beforeStart + i + 1;
+            row.beforeText = beforeLines[static_cast<size_t>(beforeStart + i)];
+        }
+        if (hasAfter) {
+            row.afterLineNumber = afterStart + i + 1;
+            row.afterText = afterLines[static_cast<size_t>(afterStart + i)];
+        }
+
+        if (hasBefore && hasAfter) {
+            row.beforeBackground = RGB(73, 44, 46);
+            row.afterBackground = RGB(38, 73, 47);
+            row.beforeTextColor = RGB(240, 210, 210);
+            row.afterTextColor = RGB(214, 239, 214);
+        } else if (hasBefore) {
+            row.beforeBackground = RGB(73, 44, 46);
+            row.beforeTextColor = RGB(240, 210, 210);
+            row.afterBackground = DarkTheme::PanelBackground();
+            row.afterTextColor = RGB(120, 120, 120);
+        } else if (hasAfter) {
+            row.beforeBackground = DarkTheme::PanelBackground();
+            row.beforeTextColor = RGB(120, 120, 120);
+            row.afterBackground = RGB(38, 73, 47);
+            row.afterTextColor = RGB(214, 239, 214);
+        }
+        rows.push_back(row);
+    }
+}
+
+std::vector<DiffDisplayLine> BuildDiffDisplayLines(
+    const std::wstring& beforeContent,
+    const std::wstring& afterContent,
+    bool hideSame) {
+    const std::vector<std::wstring> beforeLines = SplitTextLines(beforeContent);
+    const std::vector<std::wstring> afterLines = SplitTextLines(afterContent);
+    const std::vector<std::pair<int, int>> matches = ComputeLineMatches(beforeLines, afterLines);
+
+    std::vector<DiffDisplayLine> rows;
+    int beforeIndex = 0;
+    int afterIndex = 0;
+    for (const auto& match : matches) {
+        AppendDiffChangedRows(rows, beforeLines, afterLines, beforeIndex, match.first, afterIndex, match.second);
+
+        DiffDisplayLine sameRow;
+        sameRow.same = true;
+        sameRow.beforeLineNumber = match.first + 1;
+        sameRow.afterLineNumber = match.second + 1;
+        sameRow.beforeText = beforeLines[static_cast<size_t>(match.first)];
+        sameRow.afterText = afterLines[static_cast<size_t>(match.second)];
+        sameRow.beforeBackground = DarkTheme::ControlBackground();
+        sameRow.afterBackground = DarkTheme::ControlBackground();
+        sameRow.beforeTextColor = RGB(190, 196, 204);
+        sameRow.afterTextColor = RGB(190, 196, 204);
+        rows.push_back(sameRow);
+
+        beforeIndex = match.first + 1;
+        afterIndex = match.second + 1;
+    }
+    AppendDiffChangedRows(
+        rows, beforeLines, afterLines,
+        beforeIndex, static_cast<int>(beforeLines.size()),
+        afterIndex, static_cast<int>(afterLines.size()));
+
+    if (!hideSame) {
+        return rows;
+    }
+
+    std::vector<DiffDisplayLine> filtered;
+    size_t index = 0;
+    while (index < rows.size()) {
+        if (!rows[index].same) {
+            filtered.push_back(rows[index]);
+            ++index;
+            continue;
+        }
+
+        size_t end = index;
+        while (end < rows.size() && rows[end].same) {
+            ++end;
+        }
+
+        DiffDisplayLine placeholder;
+        placeholder.placeholder = true;
+        placeholder.same = true;
+        placeholder.beforeText = L"... same lines hidden ...";
+        placeholder.afterText = L"... same lines hidden ...";
+        placeholder.beforeTextColor = RGB(138, 145, 156);
+        placeholder.afterTextColor = RGB(138, 145, 156);
+        placeholder.beforeBackground = DarkTheme::PanelBackground();
+        placeholder.afterBackground = DarkTheme::PanelBackground();
+        filtered.push_back(placeholder);
+        index = end;
+    }
+    return filtered;
+}
+
+std::wstring FormatDiffDisplayLine(int lineNumber, const std::wstring& text, bool placeholder) {
+    if (placeholder) {
+        return L"      | " + text;
+    }
+
+    wchar_t buffer[32] = {};
+    if (lineNumber > 0) {
+        swprintf_s(buffer, L"%5d | ", lineNumber);
+    } else {
+        wcscpy_s(buffer, L"      | ");
+    }
+    return std::wstring(buffer) + text;
+}
+
+void AppendRichEditLine(HWND edit, const std::wstring& text, COLORREF textColor, COLORREF backgroundColor) {
+    CHARRANGE range{-1, -1};
+    SendMessageW(edit, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_COLOR | CFM_BACKCOLOR;
+    format.crTextColor = textColor;
+    format.crBackColor = backgroundColor;
+    SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
+    SendMessageW(edit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+}
+
+void RenderDiffEditors(DiffContentWindowState* state) {
+    if (state == nullptr || state->beforeEdit == nullptr || state->afterEdit == nullptr) {
+        return;
+    }
+
+    const std::vector<DiffDisplayLine> rows = BuildDiffDisplayLines(
+        state->beforeContent, state->afterContent, state->hideSame);
+
+    SetWindowTextW(state->beforeEdit, L"");
+    SetWindowTextW(state->afterEdit, L"");
+    for (const auto& row : rows) {
+        AppendRichEditLine(
+            state->beforeEdit,
+            FormatDiffDisplayLine(row.beforeLineNumber, row.beforeText, row.placeholder) + L"\r\n",
+            row.beforeTextColor,
+            row.beforeBackground);
+        AppendRichEditLine(
+            state->afterEdit,
+            FormatDiffDisplayLine(row.afterLineNumber, row.afterText, row.placeholder) + L"\r\n",
+            row.afterTextColor,
+            row.afterBackground);
+    }
+
+    SendMessageW(state->beforeEdit, WM_VSCROLL, MAKEWPARAM(SB_TOP, 0), 0);
+    SendMessageW(state->afterEdit, WM_VSCROLL, MAKEWPARAM(SB_TOP, 0), 0);
+}
+
+void SyncDiffEditors(DiffContentWindowState* state, HWND sourceEdit) {
+    if (state == nullptr || state->syncingScroll || state->beforeEdit == nullptr || state->afterEdit == nullptr) {
+        return;
+    }
+
+    HWND targetEdit = sourceEdit == state->beforeEdit ? state->afterEdit : state->beforeEdit;
+    const int sourceLine = static_cast<int>(SendMessageW(sourceEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+    const int targetLine = static_cast<int>(SendMessageW(targetEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+    const int delta = sourceLine - targetLine;
+    if (delta == 0) {
+        return;
+    }
+
+    state->syncingScroll = true;
+    SendMessageW(targetEdit, EM_LINESCROLL, 0, delta);
+    state->syncingScroll = false;
+}
+
+LRESULT CALLBACK DiffEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    HWND parent = GetParent(hwnd);
+    auto* state = reinterpret_cast<DiffContentWindowState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+    WNDPROC originalProc = nullptr;
+    if (state != nullptr) {
+        originalProc = hwnd == state->beforeEdit ? state->beforeEditProc : state->afterEditProc;
+    }
+    if (originalProc == nullptr) {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    const LRESULT result = CallWindowProcW(originalProc, hwnd, message, wParam, lParam);
+    if (state != nullptr) {
+        switch (message) {
+        case WM_MOUSEWHEEL:
+        case WM_VSCROLL:
+        case WM_KEYDOWN:
+            SyncDiffEditors(state, hwnd);
+            break;
+        default:
+            break;
+        }
+    }
+    return result;
+}
+
+std::wstring FormatCommitSummary(const std::wstring& rawDetails) {
+    std::vector<std::wstring> parts;
+    size_t start = 0;
+    while (start <= rawDetails.size()) {
+        const size_t pos = rawDetails.find(L'\x001f', start);
+        if (pos == std::wstring::npos) {
+            parts.push_back(rawDetails.substr(start));
+            break;
+        }
+        parts.push_back(rawDetails.substr(start, pos - start));
+        start = pos + 1;
+    }
+
+    const std::wstring hash = parts.size() > 0 ? Trim(parts[0]) : L"";
+    const std::wstring commitBy = parts.size() > 1 ? Trim(parts[1]) : L"";
+    const std::wstring commitDate = parts.size() > 2 ? Trim(parts[2]) : L"";
+    std::wstring message = parts.size() > 3 ? parts[3] : L"";
+    message = Trim(message);
+    std::wstringstream messageStream(message);
+    std::wstring formattedMessage;
+    std::wstring line;
+    bool firstLine = true;
+    while (std::getline(messageStream, line)) {
+        if (!line.empty() && line.back() == L'\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        if (!firstLine) {
+            formattedMessage += L"\r\n";
+        }
+        formattedMessage += L"\t" + line;
+        firstLine = false;
+    }
+    if (formattedMessage.empty()) {
+        formattedMessage = L"\t";
+    }
+
+    std::wstringstream stream;
+    stream << L"commit id: " << hash << L"\r\n"
+           << L"Commit:     " << commitBy << L"\r\n"
+           << L"CommitDate: " << commitDate << L"\r\n"
+           << L"message:\r\n\r\n"
+           << formattedMessage;
+    return stream.str();
+}
+
+LRESULT CALLBACK DiffContentWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<DiffContentWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<DiffContentWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->beforeLabel = CreateWindowExW(
+            0, L"STATIC", state->beforeTitle.c_str(),
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->afterLabel = CreateWindowExW(
+            0, L"STATIC", state->afterTitle.c_str(),
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->toggleButton = CreateWindowExW(
+            0, L"BUTTON", L"Hide Same",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4201), cs->hInstance, nullptr);
+        state->beforeEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->beforeContent.c_str(),
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
+                ES_NOHIDESEL | WS_VSCROLL | WS_HSCROLL,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->afterEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->afterContent.c_str(),
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
+                ES_NOHIDESEL | WS_VSCROLL | WS_HSCROLL,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+
+        ConfigureRichEditColors(
+            state->beforeEdit,
+            state->codeFont,
+            DarkTheme::ControlBackground(),
+            DarkTheme::TextColor());
+        ConfigureRichEditColors(
+            state->afterEdit,
+            state->codeFont,
+            DarkTheme::ControlBackground(),
+            DarkTheme::TextColor());
+        SendMessageW(state->beforeLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->afterLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->toggleButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        DarkTheme::ApplyDarkControlTheme(state->beforeEdit);
+        DarkTheme::ApplyDarkControlTheme(state->afterEdit);
+        DarkTheme::DisableVisualTheme(state->toggleButton);
+        state->beforeEditProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->beforeEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DiffEditProc)));
+        state->afterEditProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->afterEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DiffEditProc)));
+        RenderDiffEditors(state);
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr && state->beforeEdit != nullptr && state->afterEdit != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 12;
+            const int labelHeight = 24;
+            const int columnGap = 12;
+            const int buttonWidth = 120;
+            const int contentTop = padding + labelHeight + 8 + 28 + 8;
+            const int contentHeight = rc.bottom - contentTop - padding;
+            const int columnWidth = (rc.right - padding * 2 - columnGap) / 2;
+            MoveWindow(state->beforeLabel, padding, padding, columnWidth, labelHeight, TRUE);
+            MoveWindow(state->afterLabel, padding + columnWidth + columnGap, padding, columnWidth, labelHeight, TRUE);
+            MoveWindow(state->toggleButton, rc.right - padding - buttonWidth, padding + labelHeight + 4, buttonWidth, 24, TRUE);
+            MoveWindow(state->beforeEdit, padding, contentTop, columnWidth, contentHeight, TRUE);
+            MoveWindow(state->afterEdit, padding + columnWidth + columnGap, contentTop, columnWidth, contentHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == 4201) {
+            state->hideSame = (SendMessageW(state->toggleButton, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            RenderDiffEditors(state);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        if (state != nullptr &&
+            (reinterpret_cast<HWND>(lParam) == state->beforeLabel ||
+             reinterpret_cast<HWND>(lParam) == state->afterLabel ||
+             reinterpret_cast<HWND>(lParam) == state->toggleButton)) {
+            SetTextColor(dc, DarkTheme::TextColor());
+            SetBkColor(dc, DarkTheme::WindowBackground());
+            return reinterpret_cast<LRESULT>(DarkTheme::WindowBrush());
+        }
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_DESTROY:
+        delete state;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK CommitDetailWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<CommitDetailWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<CommitDetailWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->summaryEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->summary.c_str(),
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
+                ES_NOHIDESEL | WS_VSCROLL,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->fileList = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | LBS_NOTIFY | LBS_OWNERDRAWFIXED | WS_VSCROLL,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4101), cs->hInstance, nullptr);
+
+        ConfigureRichEditColors(
+            state->summaryEdit,
+            state->uiFont,
+            DarkTheme::ControlBackground(),
+            DarkTheme::TextColor());
+        SendMessageW(state->fileList, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        DarkTheme::ApplyDarkControlTheme(state->summaryEdit);
+        DarkTheme::DisableVisualTheme(state->fileList);
+
+        for (size_t i = 0; i < state->diffs.size(); ++i) {
+            const int itemIndex = static_cast<int>(SendMessageW(
+                state->fileList, LB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(BuildCommitFileLabel(state->diffs[i]).c_str())));
+            SendMessageW(state->fileList, LB_SETITEMDATA, itemIndex, static_cast<LPARAM>(i));
+        }
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 12;
+            const int topHeight = (rc.bottom - rc.top) * 38 / 100;
+            const int bottomTop = padding + topHeight + padding;
+            const int bottomHeight = rc.bottom - bottomTop - padding;
+            MoveWindow(state->summaryEdit, padding, padding, rc.right - padding * 2, topHeight, TRUE);
+            MoveWindow(state->fileList, padding, bottomTop, rc.right - padding * 2, bottomHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && reinterpret_cast<HWND>(lParam) == state->fileList) {
+            if (HIWORD(wParam) == LBN_DBLCLK) {
+                const int index = static_cast<int>(SendMessageW(state->fileList, LB_GETCURSEL, 0, 0));
+                if (index >= 0 && index < static_cast<int>(state->diffs.size())) {
+                    auto* diffState = new DiffContentWindowState();
+                    diffState->title = L"Diff - " + BuildCommitFileLabel(state->diffs[index]);
+                    const CommitFileDiff& diff = state->diffs[index];
+                    const std::wstring parentRevision = state->commitHash + L"^";
+                    std::wstring beforeContent;
+                    std::wstring afterContent;
+
+                    if (diff.status != L'A') {
+                        const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
+                        beforeContent = GitRunner::GetFileContentAtRevision(
+                            state->repoPath, parentRevision, beforePath);
+                    }
+                    if (diff.status != L'D') {
+                        const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
+                        afterContent = GitRunner::GetFileContentAtRevision(
+                            state->repoPath, state->commitHash, afterPath);
+                    }
+
+                    diffState->beforeTitle = L"Before";
+                    diffState->afterTitle = L"After";
+                    diffState->beforeContent = beforeContent.empty()
+                        ? L"(empty)"
+                        : beforeContent;
+                    diffState->afterContent = afterContent.empty()
+                        ? L"(empty)"
+                        : afterContent;
+                    diffState->uiFont = state->uiFont;
+                    diffState->codeFont = state->codeFont != nullptr ? state->codeFont : state->uiFont;
+
+                    RECT rc{};
+                    GetWindowRect(hwnd, &rc);
+                    const int width = ((rc.right - rc.left) * 9) / 10;
+                    const int height = ((rc.bottom - rc.top) * 9) / 10;
+                    const int x = rc.left + ((rc.right - rc.left) - width) / 2;
+                    const int y = rc.top + ((rc.bottom - rc.top) - height) / 2;
+                    HWND diffWindow = CreateWindowExW(
+                        0, kDiffContentWindowClass, diffState->title.c_str(),
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZEBOX | WS_THICKFRAME,
+                        x, y, width, height, hwnd, nullptr, GetModuleHandleW(nullptr), diffState);
+                    if (diffWindow == nullptr) {
+                        delete diffState;
+                    }
+                }
+                return 0;
+            }
+            return 0;
+        }
+        break;
+    case WM_DRAWITEM: {
+        const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (state != nullptr && dis != nullptr && dis->hwndItem == state->fileList) {
+            RECT rect = dis->rcItem;
+            const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+            HBRUSH brush = CreateSolidBrush(selected ? DarkTheme::AccentBackground() : DarkTheme::ControlBackground());
+            FillRect(dis->hDC, &rect, brush);
+            DeleteObject(brush);
+
+            if (dis->itemID != static_cast<UINT>(-1) && dis->itemID < state->diffs.size()) {
+                SetBkMode(dis->hDC, TRANSPARENT);
+                SetTextColor(dis->hDC, GetCommitStatusColor(state->diffs[dis->itemID].status));
+                HGDIOBJ oldFont = SelectObject(dis->hDC, state->uiFont);
+                rect.left += 16;
+                DrawTextW(
+                    dis->hDC,
+                    BuildCommitFileLabel(state->diffs[dis->itemID]).c_str(),
+                    -1,
+                    &rect,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+                SelectObject(dis->hDC, oldFont);
+            }
+            return TRUE;
+        }
+        break;
+    }
+    case WM_MEASUREITEM: {
+        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+        if (state != nullptr && mis != nullptr && mis->CtlType == ODT_LISTBOX) {
+            mis->itemHeight = 34;
+            return TRUE;
+        }
+        break;
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_DESTROY:
+        delete state;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
 
 INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<PromptDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -249,6 +930,7 @@ INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         SetWindowTextW(hwnd, state->title.c_str());
         SetDlgItemTextW(hwnd, 1001, state->prompt.c_str());
         SetDlgItemTextW(hwnd, 1002, state->text.c_str());
+        SendDlgItemMessageW(hwnd, 1002, EM_SETLIMITTEXT, 8192, 0);
         HWND parent = GetParent(hwnd);
         if (parent != nullptr) {
             RECT parentRect{};
@@ -283,15 +965,15 @@ INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     return FALSE;
 }
 
-std::vector<BYTE> BuildPromptDialogTemplate() {
-    std::vector<BYTE> bytes(1024, 0);
+std::vector<BYTE> BuildPromptDialogTemplate(bool multiline) {
+    std::vector<BYTE> bytes(2048, 0);
     auto* dlg = reinterpret_cast<DLGTEMPLATE*>(bytes.data());
     dlg->style = WS_POPUP | WS_BORDER | WS_SYSMENU | DS_MODALFRAME | WS_CAPTION | DS_SETFONT;
     dlg->cdit = 4;
     dlg->x = 10;
     dlg->y = 10;
-    dlg->cx = 220;
-    dlg->cy = 80;
+    dlg->cx = multiline ? 260 : 220;
+    dlg->cy = multiline ? 130 : 80;
 
     WORD* cursor = reinterpret_cast<WORD*>(dlg + 1);
     *cursor++ = 0;
@@ -330,10 +1012,18 @@ std::vector<BYTE> BuildPromptDialogTemplate() {
         *cursor++ = 0;
     };
 
-    addControl(WS_CHILD | WS_VISIBLE, 8, 8, 200, 10, 1001, 0x0082, L"Prompt");
-    addControl(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 8, 24, 200, 14, 1002, 0x0081, L"");
-    addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 72, 48, 60, 14, IDOK, 0x0080, L"OK");
-    addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 148, 48, 60, 14, IDCANCEL, 0x0080, L"Cancel");
+    if (multiline) {
+        addControl(WS_CHILD | WS_VISIBLE, 8, 8, 236, 10, 1001, 0x0082, L"Prompt");
+        addControl(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP,
+                   8, 24, 236, 62, 1002, 0x0081, L"");
+        addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 108, 96, 60, 14, IDOK, 0x0080, L"OK");
+        addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 184, 96, 60, 14, IDCANCEL, 0x0080, L"Cancel");
+    } else {
+        addControl(WS_CHILD | WS_VISIBLE, 8, 8, 200, 10, 1001, 0x0082, L"Prompt");
+        addControl(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 8, 24, 200, 14, 1002, 0x0081, L"");
+        addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 72, 48, 60, 14, IDOK, 0x0080, L"OK");
+        addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 148, 48, 60, 14, IDCANCEL, 0x0080, L"Cancel");
+    }
 
     bytes.resize(reinterpret_cast<BYTE*>(cursor) - bytes.data());
     return bytes;
@@ -366,6 +1056,24 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     scrollClass.hbrBackground = DarkTheme::PanelBrush();
     scrollClass.lpszClassName = kDarkScrollBarClass;
     RegisterClassExW(&scrollClass);
+
+    WNDCLASSEXW detailClass{};
+    detailClass.cbSize = sizeof(detailClass);
+    detailClass.lpfnWndProc = CommitDetailWindowProc;
+    detailClass.hInstance = instance_;
+    detailClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    detailClass.hbrBackground = DarkTheme::WindowBrush();
+    detailClass.lpszClassName = kCommitDetailWindowClass;
+    RegisterClassExW(&detailClass);
+
+    WNDCLASSEXW diffClass{};
+    diffClass.cbSize = sizeof(diffClass);
+    diffClass.lpfnWndProc = DiffContentWindowProc;
+    diffClass.hInstance = instance_;
+    diffClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    diffClass.hbrBackground = DarkTheme::WindowBrush();
+    diffClass.lpszClassName = kDiffContentWindowClass;
+    RegisterClassExW(&diffClass);
 
     const int windowWidth = std::max(projectStore_.GetWindowWidth(), kMinWindowWidth);
     const int windowHeight = std::max(projectStore_.GetWindowHeight(), kMinWindowHeight);
@@ -654,6 +1362,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             POINT point{};
             GetCursorPos(&point);
             ShowCommitContextMenu(point);
+            return 0;
+        }
+        if (header->idFrom == IDC_LIST_COMMITS && header->code == NM_DBLCLK) {
+            ShowCommitDetails();
             return 0;
         }
         if (header->idFrom == IDC_LIST_PROJECTS && header->code == LVN_ITEMCHANGED) {
@@ -1223,6 +1935,42 @@ void MainWindow::ShowCommitContextMenu(POINT screenPoint) {
     TrackPopupMenu(commitContextMenu_, TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
 }
 
+void MainWindow::ShowCommitDetails() {
+    const std::wstring repoPath = GetSelectedProjectPath();
+    const std::wstring hash = GetSelectedCommitHash();
+    if (repoPath.empty() || hash.empty() || !GitRunner::IsGitRepository(repoPath)) {
+        return;
+    }
+
+    auto* state = new CommitDetailWindowState();
+    state->repoPath = repoPath;
+    state->commitHash = hash;
+    state->title = L"Commit Details - " + hash;
+    state->summary = FormatCommitSummary(GitRunner::GetCommitDetails(repoPath, hash));
+    state->diffs = GitRunner::GetCommitFileDiffs(repoPath, hash);
+    state->uiFont = uiFont_;
+    state->codeFont = logFont_;
+
+    RECT mainRect{};
+    GetWindowRect(hwnd_, &mainRect);
+    const int width = ((mainRect.right - mainRect.left) * 9) / 10;
+    const int height = ((mainRect.bottom - mainRect.top) * 9) / 10;
+    const int x = mainRect.left + ((mainRect.right - mainRect.left) - width) / 2;
+    const int y = mainRect.top + ((mainRect.bottom - mainRect.top) - height) / 2;
+
+    HWND detail = CreateWindowExW(
+        0,
+        kCommitDetailWindowClass,
+        state->title.c_str(),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZEBOX | WS_THICKFRAME,
+        x, y, width, height,
+        hwnd_, nullptr, instance_, state);
+
+    if (detail == nullptr) {
+        delete state;
+    }
+}
+
 void MainWindow::OpenSelectedInExplorer() {
     const std::wstring path = GetSelectedProjectPath();
     if (!path.empty()) {
@@ -1327,13 +2075,26 @@ void MainWindow::RunGitInit(const std::wstring& requestedPath) {
 }
 
 void MainWindow::RunCommit() {
-    const std::wstring message = Trim(PromptForText(IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT));
+    const std::wstring message = Trim(PromptForText(IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT, L"", true));
     if (message.empty()) {
         MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMIT_EMPTY).c_str(),
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
         return;
     }
-    RunSimpleCommand({L"commit", L"-m", message});
+
+    wchar_t tempPath[MAX_PATH] = {};
+    wchar_t tempFile[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempPath);
+    GetTempFileNameW(tempPath, L"gcm", 0, tempFile);
+
+    const std::string utf8 = WideToUtf8(message);
+    {
+        std::ofstream output(tempFile, std::ios::binary | std::ios::trunc);
+        output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+    }
+
+    RunSimpleCommand({L"commit", L"-F", tempFile});
+    DeleteFileW(tempFile);
 }
 
 void MainWindow::ShowBranchMenu() {
@@ -1458,13 +2219,14 @@ void MainWindow::UpdateWindowTitle() {
     SetWindowTextW(hwnd_, title.c_str());
 }
 
-std::wstring MainWindow::PromptForText(int titleId, int promptId, const std::wstring& initialValue) {
+std::wstring MainWindow::PromptForText(int titleId, int promptId, const std::wstring& initialValue, bool multiline) {
     PromptDialogState state;
     state.title = LoadStringResource(titleId);
     state.prompt = LoadStringResource(promptId);
     state.text = initialValue;
+    state.multiline = multiline;
 
-    std::vector<BYTE> dialogTemplate = BuildPromptDialogTemplate();
+    std::vector<BYTE> dialogTemplate = BuildPromptDialogTemplate(multiline);
     DialogBoxIndirectParamW(instance_, reinterpret_cast<DLGTEMPLATE*>(dialogTemplate.data()),
                             hwnd_, PromptDialogProc, reinterpret_cast<LPARAM>(&state));
     return state.accepted ? state.text : L"";
