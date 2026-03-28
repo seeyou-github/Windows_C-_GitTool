@@ -20,7 +20,9 @@ constexpr wchar_t kMainWindowClass[] = L"GitVisualToolMainWindow";
 constexpr wchar_t kDarkScrollBarClass[] = L"GitVisualToolDarkScrollBar";
 constexpr wchar_t kCommitDetailWindowClass[] = L"GitVisualToolCommitDetailWindow";
 constexpr wchar_t kDiffContentWindowClass[] = L"GitVisualToolDiffContentWindow";
+constexpr wchar_t kCommitComposeWindowClass[] = L"GitVisualToolCommitComposeWindow";
 constexpr UINT WM_APP_GIT_COMMAND_DONE = WM_APP + 1;
+constexpr UINT WM_APP_COMMITS_REFRESH_DONE = WM_APP + 2;
 constexpr int kToolbarHeight = 44;
 constexpr int kPadding = 12;
 constexpr int kLeftPanelWidth = 380;
@@ -269,6 +271,14 @@ struct AsyncGitCommandState {
     GitCommandResult result;
 };
 
+struct AsyncCommitRefreshState {
+    HWND hwnd = nullptr;
+    std::wstring repoPath;
+    int limit = 50;
+    unsigned long long token = 0;
+    std::vector<CommitInfo> commits;
+};
+
 struct DiffContentWindowState {
     std::wstring title;
     std::wstring beforeTitle;
@@ -289,6 +299,7 @@ struct DiffContentWindowState {
 };
 
 struct CommitDetailWindowState {
+    CacheDatabase* cacheDatabase = nullptr;
     std::wstring repoPath;
     std::wstring commitHash;
     std::wstring title;
@@ -298,6 +309,24 @@ struct CommitDetailWindowState {
     HWND fileList = nullptr;
     HFONT uiFont = nullptr;
     HFONT codeFont = nullptr;
+};
+
+struct CommitComposeWindowState {
+    HWND parent = nullptr;
+    std::wstring title;
+    std::wstring repoPath;
+    std::wstring message;
+    std::vector<CommitFileDiff> diffs;
+    HWND fileList = nullptr;
+    HWND messageEdit = nullptr;
+    HWND okButton = nullptr;
+    HWND cancelButton = nullptr;
+    HWND hintLabel = nullptr;
+    HWND messageLabel = nullptr;
+    HFONT uiFont = nullptr;
+    HFONT codeFont = nullptr;
+    WNDPROC editProc = nullptr;
+    bool accepted = false;
 };
 
 COLORREF GetCommitStatusColor(wchar_t status) {
@@ -336,6 +365,41 @@ void ConfigureRichEditColors(HWND edit, HFONT font, COLORREF background, COLORRE
     format.crTextColor = textColor;
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
     SendMessageW(edit, EM_SETCHARFORMAT, SCF_DEFAULT, reinterpret_cast<LPARAM>(&format));
+}
+
+void ShowDiffWindow(
+    HWND owner,
+    const std::wstring& title,
+    const std::wstring& beforeContent,
+    const std::wstring& afterContent,
+    HFONT uiFont,
+    HFONT codeFont) {
+    auto* diffState = new DiffContentWindowState();
+    diffState->title = title;
+    diffState->beforeTitle = L"Before";
+    diffState->afterTitle = L"After";
+    diffState->beforeContent = beforeContent.empty() ? L"(empty)" : beforeContent;
+    diffState->afterContent = afterContent.empty() ? L"(empty)" : afterContent;
+    diffState->uiFont = uiFont;
+    diffState->codeFont = codeFont != nullptr ? codeFont : uiFont;
+
+    RECT rc{};
+    if (owner != nullptr && IsWindow(owner)) {
+        GetWindowRect(owner, &rc);
+    } else {
+        rc = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    }
+    const int width = ((rc.right - rc.left) * 9) / 10;
+    const int height = ((rc.bottom - rc.top) * 9) / 10;
+    const int x = rc.left + ((rc.right - rc.left) - width) / 2;
+    const int y = rc.top + ((rc.bottom - rc.top) - height) / 2;
+    HWND diffWindow = CreateWindowExW(
+        0, kDiffContentWindowClass, diffState->title.c_str(),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZEBOX | WS_THICKFRAME,
+        x, y, width, height, nullptr, nullptr, GetModuleHandleW(nullptr), diffState);
+    if (diffWindow == nullptr) {
+        delete diffState;
+    }
 }
 
 struct DiffDisplayLine {
@@ -632,6 +696,20 @@ LRESULT CALLBACK PromptEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
     return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam);
 }
 
+LRESULT CALLBACK CommitComposeEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    HWND parent = GetParent(hwnd);
+    auto* state = reinterpret_cast<CommitComposeWindowState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+    if (state == nullptr || state->editProc == nullptr) {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    if (message == WM_GETDLGCODE) {
+        return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam) | DLGC_WANTALLKEYS;
+    }
+
+    return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam);
+}
+
 std::wstring FormatCommitSummary(const std::wstring& rawDetails) {
     std::vector<std::wstring> parts;
     size_t start = 0;
@@ -781,8 +859,208 @@ LRESULT CALLBACK DiffContentWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
         FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
         return 1;
     }
-    case WM_DESTROY:
+    case WM_DESTROY: {
+        HWND owner = GetWindow(hwnd, GW_OWNER);
+        if (owner != nullptr && IsWindow(owner)) {
+            ShowWindow(owner, SW_SHOW);
+            SetWindowPos(owner, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetForegroundWindow(owner);
+            SetActiveWindow(owner);
+        }
         delete state;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    }
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<CommitComposeWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<CommitComposeWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->hintLabel = CreateWindowExW(
+            0, L"STATIC", L"Double-click a diff file to compare.",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->messageLabel = CreateWindowExW(
+            0, L"STATIC", L"Commit Message",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->fileList = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | LBS_NOTIFY | LBS_OWNERDRAWFIXED | WS_VSCROLL,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4301), cs->hInstance, nullptr);
+        state->messageEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->message.c_str(),
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
+                WS_VSCROLL | WS_TABSTOP,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4302), cs->hInstance, nullptr);
+        state->okButton = CreateWindowExW(
+            0, L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
+        state->cancelButton = CreateWindowExW(
+            0, L"BUTTON", L"Cancel",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+
+        SendMessageW(state->hintLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->messageLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->fileList, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->okButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->cancelButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        ConfigureRichEditColors(
+            state->messageEdit,
+            state->uiFont,
+            DarkTheme::ControlBackground(),
+            DarkTheme::TextColor());
+        DarkTheme::DisableVisualTheme(state->fileList);
+        DarkTheme::ApplyDarkControlTheme(state->messageEdit);
+        state->editProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->messageEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(CommitComposeEditProc)));
+
+        for (size_t i = 0; i < state->diffs.size(); ++i) {
+            const int itemIndex = static_cast<int>(SendMessageW(
+                state->fileList, LB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(BuildCommitFileLabel(state->diffs[i]).c_str())));
+            SendMessageW(state->fileList, LB_SETITEMDATA, itemIndex, static_cast<LPARAM>(i));
+        }
+        SetFocus(state->messageEdit);
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 12;
+            const int footerHeight = 34;
+            const int labelHeight = 24;
+            const int columnGap = 12;
+            const int leftWidth = (rc.right - padding * 2 - columnGap) * 35 / 100;
+            const int rightX = padding + leftWidth + columnGap;
+            const int rightWidth = rc.right - rightX - padding;
+            const int contentHeight = rc.bottom - padding * 3 - footerHeight - labelHeight;
+
+            MoveWindow(state->hintLabel, padding, padding, leftWidth, labelHeight, TRUE);
+            MoveWindow(state->messageLabel, rightX, padding, rightWidth, labelHeight, TRUE);
+            MoveWindow(state->fileList, padding, padding + labelHeight + 4, leftWidth, contentHeight, TRUE);
+            MoveWindow(state->messageEdit, rightX, padding + labelHeight + 4, rightWidth, contentHeight, TRUE);
+            MoveWindow(state->cancelButton, rc.right - padding - 96, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
+            MoveWindow(state->okButton, rc.right - padding - 96 - 104, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && reinterpret_cast<HWND>(lParam) == state->fileList && HIWORD(wParam) == LBN_DBLCLK) {
+            const int index = static_cast<int>(SendMessageW(state->fileList, LB_GETCURSEL, 0, 0));
+            if (index >= 0 && index < static_cast<int>(state->diffs.size())) {
+                const CommitFileDiff& diff = state->diffs[index];
+                std::wstring beforeContent;
+                std::wstring afterContent;
+                const std::wstring repoRoot = state->repoPath;
+                const std::filesystem::path repoRootPath(state->repoPath);
+
+                if (diff.status != L'A') {
+                    const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
+                    beforeContent = GitRunner::GetFileContentAtRevision(repoRoot, L"HEAD", beforePath);
+                }
+                if (diff.status != L'D') {
+                    const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
+                    afterContent = GitRunner::ReadWorkingTreeFile((repoRootPath / std::filesystem::path(afterPath)).wstring());
+                }
+
+                ShowDiffWindow(
+                    hwnd,
+                    L"Diff - " + BuildCommitFileLabel(diff),
+                    beforeContent,
+                    afterContent,
+                    state->uiFont,
+                    state->codeFont);
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == IDOK && state != nullptr) {
+            const int length = GetWindowTextLengthW(state->messageEdit);
+            std::wstring text(static_cast<size_t>(length), L'\0');
+            if (length > 0) {
+                std::vector<wchar_t> buffer(static_cast<size_t>(length) + 1, L'\0');
+                GetWindowTextW(state->messageEdit, buffer.data(), length + 1);
+                text.assign(buffer.data());
+            }
+            state->message = text;
+            state->accepted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_DRAWITEM: {
+        const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (state != nullptr && dis != nullptr && dis->hwndItem == state->fileList) {
+            RECT rect = dis->rcItem;
+            const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+            HBRUSH brush = CreateSolidBrush(selected ? DarkTheme::AccentBackground() : DarkTheme::ControlBackground());
+            FillRect(dis->hDC, &rect, brush);
+            DeleteObject(brush);
+            if (dis->itemID != static_cast<UINT>(-1) && dis->itemID < state->diffs.size()) {
+                SetBkMode(dis->hDC, TRANSPARENT);
+                SetTextColor(dis->hDC, GetCommitStatusColor(state->diffs[dis->itemID].status));
+                HGDIOBJ oldFont = SelectObject(dis->hDC, state->uiFont);
+                rect.left += 14;
+                DrawTextW(dis->hDC, BuildCommitFileLabel(state->diffs[dis->itemID]).c_str(), -1,
+                          &rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+                SelectObject(dis->hDC, oldFont);
+            }
+            return TRUE;
+        }
+        break;
+    }
+    case WM_MEASUREITEM: {
+        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+        if (state != nullptr && mis != nullptr && mis->CtlType == ODT_LISTBOX) {
+            mis->itemHeight = 32;
+            return TRUE;
+        }
+        break;
+    }
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (state != nullptr && state->parent != nullptr && IsWindow(state->parent)) {
+            EnableWindow(state->parent, TRUE);
+            SetForegroundWindow(state->parent);
+            SetActiveWindow(state->parent);
+        }
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         return 0;
     default:
@@ -844,48 +1122,35 @@ LRESULT CALLBACK CommitDetailWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
             if (HIWORD(wParam) == LBN_DBLCLK) {
                 const int index = static_cast<int>(SendMessageW(state->fileList, LB_GETCURSEL, 0, 0));
                 if (index >= 0 && index < static_cast<int>(state->diffs.size())) {
-                    auto* diffState = new DiffContentWindowState();
-                    diffState->title = L"Diff - " + BuildCommitFileLabel(state->diffs[index]);
                     const CommitFileDiff& diff = state->diffs[index];
-                    const std::wstring parentRevision = state->commitHash + L"^";
                     std::wstring beforeContent;
                     std::wstring afterContent;
+                    const std::wstring diffKey = diff.path;
 
-                    if (diff.status != L'A') {
-                        const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
-                        beforeContent = GitRunner::GetFileContentAtRevision(
-                            state->repoPath, parentRevision, beforePath);
-                    }
-                    if (diff.status != L'D') {
-                        const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
-                        afterContent = GitRunner::GetFileContentAtRevision(
-                            state->repoPath, state->commitHash, afterPath);
+                    if (!state->cacheDatabase->GetDiffContent(
+                            state->repoPath, state->commitHash, diffKey, &beforeContent, &afterContent)) {
+                        const std::wstring parentRevision = state->commitHash + L"^";
+                        if (diff.status != L'A') {
+                            const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
+                            beforeContent = GitRunner::GetFileContentAtRevision(
+                                state->repoPath, parentRevision, beforePath);
+                        }
+                        if (diff.status != L'D') {
+                            const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
+                            afterContent = GitRunner::GetFileContentAtRevision(
+                                state->repoPath, state->commitHash, afterPath);
+                        }
+                        state->cacheDatabase->PutDiffContent(
+                            state->repoPath, state->commitHash, diffKey, beforeContent, afterContent);
                     }
 
-                    diffState->beforeTitle = L"Before";
-                    diffState->afterTitle = L"After";
-                    diffState->beforeContent = beforeContent.empty()
-                        ? L"(empty)"
-                        : beforeContent;
-                    diffState->afterContent = afterContent.empty()
-                        ? L"(empty)"
-                        : afterContent;
-                    diffState->uiFont = state->uiFont;
-                    diffState->codeFont = state->codeFont != nullptr ? state->codeFont : state->uiFont;
-
-                    RECT rc{};
-                    GetWindowRect(hwnd, &rc);
-                    const int width = ((rc.right - rc.left) * 9) / 10;
-                    const int height = ((rc.bottom - rc.top) * 9) / 10;
-                    const int x = rc.left + ((rc.right - rc.left) - width) / 2;
-                    const int y = rc.top + ((rc.bottom - rc.top) - height) / 2;
-                    HWND diffWindow = CreateWindowExW(
-                        0, kDiffContentWindowClass, diffState->title.c_str(),
-                        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZEBOX | WS_THICKFRAME,
-                        x, y, width, height, hwnd, nullptr, GetModuleHandleW(nullptr), diffState);
-                    if (diffWindow == nullptr) {
-                        delete diffState;
-                    }
+                    ShowDiffWindow(
+                        hwnd,
+                        L"Diff - " + BuildCommitFileLabel(diff),
+                        beforeContent,
+                        afterContent,
+                        state->uiFont,
+                        state->codeFont);
                 }
                 return 0;
             }
@@ -940,10 +1205,19 @@ LRESULT CALLBACK CommitDetailWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
         FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
         return 1;
     }
-    case WM_DESTROY:
+    case WM_DESTROY: {
+        HWND owner = GetWindow(hwnd, GW_OWNER);
+        if (owner != nullptr && IsWindow(owner)) {
+            ShowWindow(owner, SW_SHOW);
+            SetWindowPos(owner, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetForegroundWindow(owner);
+            SetActiveWindow(owner);
+        }
         delete state;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         return 0;
+    }
     default:
         break;
     }
@@ -1073,6 +1347,8 @@ MainWindow::MainWindow() = default;
 bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     instance_ = instance;
     projectStore_.Load();
+    cacheDatabase_.SetPath(GetExecutableDirectory() + L"\\GitVisualTool.cache.db");
+    cacheDatabase_.Load();
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1111,6 +1387,15 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     diffClass.hbrBackground = DarkTheme::WindowBrush();
     diffClass.lpszClassName = kDiffContentWindowClass;
     RegisterClassExW(&diffClass);
+
+    WNDCLASSEXW composeClass{};
+    composeClass.cbSize = sizeof(composeClass);
+    composeClass.lpfnWndProc = CommitComposeWindowProc;
+    composeClass.hInstance = instance_;
+    composeClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    composeClass.hbrBackground = DarkTheme::WindowBrush();
+    composeClass.lpszClassName = kCommitComposeWindowClass;
+    RegisterClassExW(&composeClass);
 
     const int windowWidth = std::max(projectStore_.GetWindowWidth(), kMinWindowWidth);
     const int windowHeight = std::max(projectStore_.GetWindowHeight(), kMinWindowHeight);
@@ -1286,6 +1571,21 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
     return 0;
 }
 
+DWORD WINAPI MainWindow::AsyncCommitRefreshThread(LPVOID param) {
+    auto* state = reinterpret_cast<AsyncCommitRefreshState*>(param);
+    if (state == nullptr) {
+        return 0;
+    }
+
+    MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(state->hwnd, GWLP_USERDATA));
+    if (self != nullptr) {
+        state->commits = GitRunner::GetRecentCommits(state->repoPath, state->limit);
+        self->cacheDatabase_.PutCommitList(state->repoPath, state->commits);
+    }
+    PostMessageW(state->hwnd, WM_APP_COMMITS_REFRESH_DONE, 0, reinterpret_cast<LPARAM>(state));
+    return 0;
+}
+
 LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE:
@@ -1305,6 +1605,16 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_SIZE:
         LayoutControls(LOWORD(lParam), HIWORD(lParam));
         return 0;
+    case WM_APP_COMMITS_REFRESH_DONE: {
+        auto* state = reinterpret_cast<AsyncCommitRefreshState*>(lParam);
+        if (state != nullptr) {
+            if (state->token == commitRefreshToken_ && state->repoPath == GetSelectedProjectPath()) {
+                PopulateCommitList(state->commits);
+            }
+            delete state;
+        }
+        return 0;
+    }
     case WM_APP_GIT_COMMAND_DONE: {
         auto* state = reinterpret_cast<AsyncGitCommandState*>(lParam);
         if (state != nullptr) {
@@ -1817,9 +2127,9 @@ void MainWindow::RefreshCurrentRepository(bool runStatusCommand) {
 }
 
 void MainWindow::RefreshCommitList() {
-    ListView_DeleteAllItems(commitList_);
     const std::wstring path = GetSelectedProjectPath();
     if (path.empty()) {
+        ListView_DeleteAllItems(commitList_);
         return;
     }
 
@@ -1828,7 +2138,30 @@ void MainWindow::RefreshCommitList() {
         return;
     }
 
-    const auto commits = commitRepository_.LoadRecent(path, 50);
+    const auto cachedCommits = cacheDatabase_.GetCommitList(path, 50);
+    if (!cachedCommits.empty()) {
+        PopulateCommitList(cachedCommits);
+    } else {
+        ShowCommitPlaceholder(L"Loading commits...");
+    }
+
+    auto* state = new AsyncCommitRefreshState();
+    state->hwnd = hwnd_;
+    state->repoPath = path;
+    state->limit = 50;
+    state->token = ++commitRefreshToken_;
+
+    const HANDLE thread = CreateThread(
+        nullptr, 0, MainWindow::AsyncCommitRefreshThread, state, 0, nullptr);
+    if (thread == nullptr) {
+        delete state;
+        return;
+    }
+    CloseHandle(thread);
+}
+
+void MainWindow::PopulateCommitList(const std::vector<CommitInfo>& commits) {
+    ListView_DeleteAllItems(commitList_);
     for (size_t i = 0; i < commits.size(); ++i) {
         LVITEMW item{};
         item.mask = LVIF_TEXT;
@@ -2037,6 +2370,7 @@ void MainWindow::RemoveSelectedProject() {
     }
     projectStore_.RemoveProject(path);
     projectStore_.Save();
+    cacheDatabase_.RemoveRepository(path);
     LoadProjectsIntoList();
     RefreshCurrentRepository(false);
 }
@@ -2082,11 +2416,15 @@ void MainWindow::ShowCommitDetails() {
     }
 
     auto* state = new CommitDetailWindowState();
+    state->cacheDatabase = &cacheDatabase_;
     state->repoPath = repoPath;
     state->commitHash = hash;
     state->title = L"Commit Details - " + hash;
-    state->summary = FormatCommitSummary(GitRunner::GetCommitDetails(repoPath, hash));
-    state->diffs = GitRunner::GetCommitFileDiffs(repoPath, hash);
+    if (!cacheDatabase_.GetCommitDetail(repoPath, hash, &state->summary, &state->diffs)) {
+        state->summary = FormatCommitSummary(GitRunner::GetCommitDetails(repoPath, hash));
+        state->diffs = GitRunner::GetCommitFileDiffs(repoPath, hash, false);
+        cacheDatabase_.PutCommitDetail(repoPath, hash, state->summary, state->diffs);
+    }
     state->uiFont = uiFont_;
     state->codeFont = logFont_;
 
@@ -2103,7 +2441,7 @@ void MainWindow::ShowCommitDetails() {
         state->title.c_str(),
         WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZEBOX | WS_THICKFRAME,
         x, y, width, height,
-        hwnd_, nullptr, instance_, state);
+        nullptr, nullptr, instance_, state);
 
     if (detail == nullptr) {
         delete state;
@@ -2260,8 +2598,8 @@ void MainWindow::RunGitInit(const std::wstring& requestedPath) {
 
 void MainWindow::RunCommit() {
     bool accepted = false;
-    const std::wstring message = Trim(PromptForText(
-        IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT, L"", true, &accepted));
+    const std::wstring path = GetSelectedProjectPath();
+    const std::wstring message = Trim(PromptForCommitMessage(path, &accepted));
     if (!accepted) {
         return;
     }
@@ -2472,6 +2810,56 @@ void MainWindow::UpdateWindowTitle() {
         title += L" - " + BaseNameFromPath(path);
     }
     SetWindowTextW(hwnd_, title.c_str());
+}
+
+std::wstring MainWindow::PromptForCommitMessage(const std::wstring& repoPath, bool* accepted) {
+    auto* state = new CommitComposeWindowState();
+    state->parent = hwnd_;
+    state->title = LoadStringResource(IDS_MSG_COMMIT_TITLE);
+    state->repoPath = repoPath;
+    state->diffs = GitRunner::GetWorkingTreeDiffs(repoPath);
+    state->uiFont = uiFont_;
+    state->codeFont = logFont_;
+
+    RECT parentRect{};
+    GetWindowRect(hwnd_, &parentRect);
+    const int width = std::max(960, static_cast<int>((parentRect.right - parentRect.left) * 8 / 10));
+    const int height = std::max(620, static_cast<int>((parentRect.bottom - parentRect.top) * 8 / 10));
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(hwnd_, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kCommitComposeWindowClass,
+        state->title.c_str(),
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE | WS_THICKFRAME,
+        x, y, width, height,
+        nullptr, nullptr, instance_, state);
+    if (dialog == nullptr) {
+        EnableWindow(hwnd_, TRUE);
+        delete state;
+        if (accepted != nullptr) {
+            *accepted = false;
+        }
+        return L"";
+    }
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool wasAccepted = state->accepted;
+    const std::wstring text = state->message;
+    if (accepted != nullptr) {
+        *accepted = wasAccepted;
+    }
+    delete state;
+    return wasAccepted ? text : L"";
 }
 
 std::wstring MainWindow::PromptForText(

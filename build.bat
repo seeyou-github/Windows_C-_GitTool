@@ -19,6 +19,9 @@ if errorlevel 1 goto error
 %CXX% -c src\GitRunner.cpp %CXXFLAGS% -o build\GitRunner.o
 if errorlevel 1 goto error
 
+%CXX% -c src\CacheDatabase.cpp %CXXFLAGS% -o build\CacheDatabase.o
+if errorlevel 1 goto error
+
 %CXX% -c src\Config.cpp %CXXFLAGS% -o build\Config.o
 if errorlevel 1 goto error
 
@@ -35,7 +38,7 @@ if errorlevel 1 goto error
 if errorlevel 1 goto error
 
 echo Linking...
-%CXX% build\main.o build\MainWindow.o build\GitRunner.o build\Config.o build\ProjectStore.o build\CommitRepository.o build\DarkTheme.o build\resource.o -o build\GitVisualTool.exe %LDFLAGS%
+%CXX% build\main.o build\MainWindow.o build\GitRunner.o build\CacheDatabase.o build\Config.o build\ProjectStore.o build\CommitRepository.o build\DarkTheme.o build\resource.o -o build\GitVisualTool.exe %LDFLAGS%
 if errorlevel 1 goto error
 
 echo ===== Build succeeded =====

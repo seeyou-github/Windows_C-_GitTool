@@ -45,9 +45,14 @@ public:
     static std::vector<std::wstring> GetLocalBranches(const std::wstring& repoPath);
     static std::wstring GetCurrentBranch(const std::wstring& repoPath);
     static std::wstring GetCommitDetails(const std::wstring& repoPath, const std::wstring& commitHash);
-    static std::vector<CommitFileDiff> GetCommitFileDiffs(const std::wstring& repoPath, const std::wstring& commitHash);
+    static std::vector<CommitFileDiff> GetCommitFileDiffs(
+        const std::wstring& repoPath,
+        const std::wstring& commitHash,
+        bool includePatch = false);
     static std::wstring GetFileContentAtRevision(
         const std::wstring& repoPath,
         const std::wstring& revision,
         const std::wstring& filePath);
+    static std::vector<CommitFileDiff> GetWorkingTreeDiffs(const std::wstring& repoPath);
+    static std::wstring ReadWorkingTreeFile(const std::wstring& filePath);
 };

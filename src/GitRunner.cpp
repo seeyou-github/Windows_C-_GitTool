@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <fstream>
 #include <sstream>
 
 namespace {
@@ -52,6 +53,17 @@ std::wstring Utf8ToWide(const std::string& text) {
     std::wstring wide(size, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), wide.data(), size);
     return wide;
+}
+
+std::wstring ReadFileToWide(const std::wstring& filePath) {
+    std::ifstream input(filePath.c_str(), std::ios::binary);
+    if (!input.is_open()) {
+        return L"";
+    }
+
+    std::stringstream buffer;
+    buffer << input.rdbuf();
+    return Utf8ToWide(buffer.str());
 }
 
 std::vector<std::wstring> SplitLines(const std::wstring& text) {
@@ -251,11 +263,14 @@ std::wstring GitRunner::GetCommitDetails(const std::wstring& repoPath, const std
     return result.success ? result.output : result.output;
 }
 
-std::vector<CommitFileDiff> GitRunner::GetCommitFileDiffs(const std::wstring& repoPath, const std::wstring& commitHash) {
+std::vector<CommitFileDiff> GitRunner::GetCommitFileDiffs(
+    const std::wstring& repoPath,
+    const std::wstring& commitHash,
+    bool includePatch) {
     std::vector<CommitFileDiff> diffs;
     const GitCommandResult namesResult = RunGitCommand(
         repoPath,
-        {L"diff-tree", L"--no-commit-id", L"--find-renames", L"--name-status", L"-r", commitHash});
+        {L"diff-tree", L"--root", L"--no-commit-id", L"--find-renames", L"--name-status", L"-r", commitHash});
     if (!namesResult.success) {
         return diffs;
     }
@@ -289,9 +304,11 @@ std::vector<CommitFileDiff> GitRunner::GetCommitFileDiffs(const std::wstring& re
             diff.patchPath = diff.path;
         }
 
-        const GitCommandResult patchResult = RunGitCommand(
-            repoPath, {L"show", L"--format=", commitHash, L"--", diff.patchPath});
-        diff.patch = patchResult.output;
+        if (includePatch) {
+            const GitCommandResult patchResult = RunGitCommand(
+                repoPath, {L"show", L"--format=", commitHash, L"--", diff.patchPath});
+            diff.patch = patchResult.output;
+        }
         diffs.push_back(diff);
     }
     return diffs;
@@ -309,4 +326,73 @@ std::wstring GitRunner::GetFileContentAtRevision(
         repoPath,
         {L"show", revision + L":" + filePath});
     return result.success ? result.output : L"";
+}
+
+std::vector<CommitFileDiff> GitRunner::GetWorkingTreeDiffs(const std::wstring& repoPath) {
+    std::vector<CommitFileDiff> diffs;
+    const GitCommandResult result = RunGitCommand(
+        repoPath,
+        {L"status", L"--short", L"--untracked-files=all"});
+    if (!result.success) {
+        return diffs;
+    }
+
+    for (const std::wstring& line : SplitLines(result.output)) {
+        if (line.size() < 3) {
+            continue;
+        }
+
+        CommitFileDiff diff;
+        if (line.rfind(L"?? ", 0) == 0) {
+            diff.status = L'A';
+            diff.path = line.substr(3);
+            diff.oldPath.clear();
+            diff.newPath = diff.path;
+            diff.patchPath = diff.path;
+        } else {
+            const wchar_t x = line[0];
+            const wchar_t y = line[1];
+            const std::wstring pathText = line.substr(3);
+
+            if (x == L'R' || y == L'R') {
+                diff.status = L'R';
+                const size_t arrowPos = pathText.find(L" -> ");
+                if (arrowPos != std::wstring::npos) {
+                    diff.oldPath = pathText.substr(0, arrowPos);
+                    diff.newPath = pathText.substr(arrowPos + 4);
+                    diff.path = diff.oldPath + L" -> " + diff.newPath;
+                    diff.patchPath = diff.newPath;
+                } else {
+                    diff.path = pathText;
+                    diff.oldPath = pathText;
+                    diff.newPath = pathText;
+                    diff.patchPath = pathText;
+                }
+            } else if (x == L'D' || y == L'D') {
+                diff.status = L'D';
+                diff.path = pathText;
+                diff.oldPath = pathText;
+                diff.newPath.clear();
+                diff.patchPath = pathText;
+            } else if (x == L'A' || y == L'A') {
+                diff.status = L'A';
+                diff.path = pathText;
+                diff.oldPath.clear();
+                diff.newPath = pathText;
+                diff.patchPath = pathText;
+            } else {
+                diff.status = L'M';
+                diff.path = pathText;
+                diff.oldPath = pathText;
+                diff.newPath = pathText;
+                diff.patchPath = pathText;
+            }
+        }
+        diffs.push_back(diff);
+    }
+    return diffs;
+}
+
+std::wstring GitRunner::ReadWorkingTreeFile(const std::wstring& filePath) {
+    return ReadFileToWide(filePath);
 }

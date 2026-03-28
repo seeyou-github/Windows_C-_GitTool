@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CacheDatabase.h"
 #include "CommitRepository.h"
 #include "ProjectStore.h"
 
@@ -19,6 +20,7 @@ private:
     static LRESULT CALLBACK LogEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LogScrollBarProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     static DWORD WINAPI AsyncGitCommandThread(LPVOID param);
+    static DWORD WINAPI AsyncCommitRefreshThread(LPVOID param);
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void CreateControls();
@@ -32,6 +34,7 @@ private:
     void LoadProjectsIntoList();
     void RefreshCurrentRepository(bool runStatusCommand);
     void RefreshCommitList();
+    void PopulateCommitList(const std::vector<CommitInfo>& commits);
     void ShowCommitPlaceholder(const std::wstring& message);
     void ClearLog();
     void AppendLog(const std::wstring& text);
@@ -67,6 +70,7 @@ private:
     void HandleRemoteMenuCommand(UINT commandId);
     void HandleCommitMenuCommand(UINT commandId);
     bool CanEditSelectedCommitMessage() const;
+    std::wstring PromptForCommitMessage(const std::wstring& repoPath, bool* accepted);
     void SetButtonText(int controlId, int stringId);
     void SetWindowTextFromString(int stringId);
     void UpdateWindowTitle();
@@ -105,6 +109,7 @@ private:
     HFONT logFont_ = nullptr;
     HFONT menuFont_ = nullptr;
     WNDPROC defaultLogEditProc_ = nullptr;
+    CacheDatabase cacheDatabase_;
     ProjectStore projectStore_;
     CommitRepository commitRepository_;
     bool commandRunning_ = false;
@@ -115,5 +120,6 @@ private:
     bool initialShowPrepared_ = false;
     bool suppressProjectSelectionRefresh_ = false;
     HANDLE currentCancelEvent_ = nullptr;
+    unsigned long long commitRefreshToken_ = 0;
     std::wstring currentProjectPath_;
 };
