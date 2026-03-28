@@ -1630,6 +1630,39 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             SetCommandUiState(false, state->result.cancelled ? L"Cancelled" : L"Ready");
             AppendCommandResult(state->result);
 
+            const bool isPlainPushCommand =
+                state->args.size() == 1 && state->args[0] == L"push";
+            const bool needsUpstreamPrompt =
+                isPlainPushCommand &&
+                !state->result.success &&
+                !state->result.cancelled &&
+                state->result.output.find(L"has no upstream branch") != std::wstring::npos;
+
+            if (needsUpstreamPrompt) {
+                const std::wstring currentBranch = GitRunner::GetCurrentBranch(state->repoPath);
+                if (!currentBranch.empty()) {
+                    std::wstring prompt =
+                        L"The current branch has no upstream branch.\n\n"
+                        L"Do you want to run:\n"
+                        L"git push --set-upstream origin " + currentBranch + L"\n";
+                    if (MessageBoxW(
+                            hwnd_,
+                            prompt.c_str(),
+                            LoadStringResource(IDS_APP_TITLE).c_str(),
+                            MB_ICONQUESTION | MB_YESNO) == IDYES) {
+                        RunSimpleCommand(
+                            {L"push", L"--set-upstream", L"origin", currentBranch},
+                            false,
+                            true);
+                        if (completedCancelEvent != nullptr && completedCancelEvent != currentCancelEvent_) {
+                            state->cancelEvent = nullptr;
+                        }
+                        delete state;
+                        return 0;
+                    }
+                }
+            }
+
             const std::wstring selectedPath = GetSelectedProjectPath();
             if (selectedPath == state->repoPath) {
                 if (state->refreshStatusAfter) {
