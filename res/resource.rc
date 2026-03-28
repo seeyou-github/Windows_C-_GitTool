@@ -1,0 +1,46 @@
+#pragma code_page(65001)
+#include "../src/ResourceIds.h"
+#include <winresrc.h>
+
+LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
+
+STRINGTABLE
+BEGIN
+    IDS_APP_TITLE "Git Visual Tool"
+    IDS_BTN_ADD_FOLDER "Add Repo"
+    IDS_BTN_STATUS "status"
+    IDS_BTN_ADD_ALL "add -A"
+    IDS_BTN_COMMIT "commit"
+    IDS_BTN_PUSH "push"
+    IDS_BTN_PULL "pull"
+    IDS_BTN_FETCH "fetch"
+    IDS_BTN_BRANCH "branch"
+    IDS_BTN_REMOTE "remote"
+    IDS_COL_HASH "Hash"
+    IDS_COL_MESSAGE "Message"
+    IDS_COL_AUTHOR "Author"
+    IDS_COL_DATE "Date"
+    IDS_LOG_READY "就绪。请选择或添加一个 Git 仓库。"
+    IDS_MSG_SELECT_REPO "请先选择一个仓库。"
+    IDS_MSG_INVALID_REPO "选择的文件夹不是有效的 Git 仓库。"
+    IDS_MSG_ADD_REPO_TITLE "选择 Git 仓库文件夹"
+    IDS_MSG_COMMIT_TITLE "提交"
+    IDS_MSG_COMMIT_PROMPT "请输入提交信息："
+    IDS_MSG_BRANCH_PROMPT "请输入新分支名称："
+    IDS_MSG_REMOTE_PROMPT "请输入 origin 远程地址："
+    IDS_MSG_REMOVE_REPO "确定要移除选中仓库吗？"
+    IDS_MENU_REMOVE "移除"
+    IDS_MENU_OPEN_EXPLORER "打开资源管理器"
+    IDS_MENU_OPEN_TERMINAL "打开终端"
+    IDS_MENU_REFRESH "刷新"
+    IDS_MSG_ADD_FOLDER_FAIL "无法添加仓库。"
+    IDS_MSG_COMMIT_EMPTY "提交信息不能为空。"
+    IDS_MSG_REMOTE_EMPTY "远程地址不能为空。"
+    IDS_MSG_BRANCH_EMPTY "分支名称不能为空。"
+    IDS_MSG_COMMAND_RUNNING "当前有命令正在执行。"
+    IDS_MSG_BRANCH_TITLE "分支管理"
+    IDS_MSG_REMOTE_TITLE "远程管理"
+    IDS_MSG_NO_BRANCHES "当前仓库没有可用分支。"
+    IDS_MSG_REMOTE_UPDATED "已更新 origin 远程地址。"
+    IDS_MSG_PROJECT_EXISTS "该仓库已在列表中。"
+END
