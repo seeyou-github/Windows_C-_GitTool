@@ -25,8 +25,12 @@ constexpr wchar_t kCommitDetailWindowClass[] = L"GitVisualToolCommitDetailWindow
 constexpr wchar_t kDiffContentWindowClass[] = L"GitVisualToolDiffContentWindow";
 constexpr wchar_t kCommitComposeWindowClass[] = L"GitVisualToolCommitComposeWindow";
 constexpr wchar_t kSquashComposeWindowClass[] = L"GitVisualToolSquashComposeWindow";
+constexpr wchar_t kCloneWindowClass[] = L"GitVisualToolCloneWindow";
+constexpr wchar_t kDeleteBranchWindowClass[] = L"GitVisualToolDeleteBranchWindow";
 constexpr UINT WM_APP_GIT_COMMAND_DONE = WM_APP + 1;
 constexpr UINT WM_APP_COMMITS_REFRESH_DONE = WM_APP + 2;
+constexpr UINT WM_APP_GIT_COMMAND_OUTPUT = WM_APP + 3;
+constexpr UINT_PTR kLogFlushTimerId = 1;
 constexpr int kToolbarHeight = 44;
 constexpr int kPadding = 12;
 constexpr int kLeftPanelWidth = 380;
@@ -35,12 +39,70 @@ constexpr int kMinWindowWidth = 1231;
 constexpr int kMinWindowHeight = 820;
 constexpr int kLogScrollBarWidth = 14;
 constexpr int kStatusBarHeight = 32;
+constexpr size_t kMaxLogChars = 200000;
+constexpr size_t kLogTrimTargetChars = 150000;
 HFONT g_menuFont = nullptr;
 constexpr COLORREF kMenuBackground = RGB(242, 242, 242);
 constexpr COLORREF kMenuHoverBackground = RGB(228, 228, 228);
 constexpr COLORREF kMenuText = RGB(40, 40, 40);
 constexpr COLORREF kLogDefaultText = RGB(170, 176, 184);
 std::unique_ptr<Gdiplus::Bitmap> g_githubBitmap;
+
+bool TryParseGitProgressLine(const std::wstring& rawLine, int* percent, std::wstring* label) {
+    std::wstring line = rawLine;
+    const wchar_t* whitespace = L" \t\r\n";
+    const size_t begin = line.find_first_not_of(whitespace);
+    if (begin == std::wstring::npos) {
+        return false;
+    }
+    const size_t end = line.find_last_not_of(whitespace);
+    line = line.substr(begin, end - begin + 1);
+    if (line.empty()) {
+        return false;
+    }
+
+    const std::wstring prefixes[] = {
+        L"Receiving objects:",
+        L"Resolving deltas:",
+        L"Compressing objects:",
+        L"Writing objects:"
+    };
+
+    bool matched = false;
+    for (const auto& prefix : prefixes) {
+        if (line.size() >= prefix.size() &&
+            std::equal(prefix.begin(), prefix.end(), line.begin())) {
+            if (label != nullptr) {
+                *label = prefix.substr(0, prefix.size() - 1);
+            }
+            matched = true;
+            break;
+        }
+    }
+    if (!matched) {
+        return false;
+    }
+
+    const size_t percentPos = line.find(L'%');
+    if (percentPos == std::wstring::npos) {
+        return false;
+    }
+
+    size_t numberEnd = percentPos;
+    size_t numberBegin = numberEnd;
+    while (numberBegin > 0 && iswdigit(line[numberBegin - 1])) {
+        --numberBegin;
+    }
+    if (numberBegin == numberEnd) {
+        return false;
+    }
+
+    const int value = _wtoi(line.substr(numberBegin, numberEnd - numberBegin).c_str());
+    if (percent != nullptr) {
+        *percent = std::clamp(value, 0, 100);
+    }
+    return true;
+}
 
 std::wstring Trim(const std::wstring& value) {
     const wchar_t* whitespace = L" \t\r\n";
@@ -94,6 +156,77 @@ std::wstring NormalizeGitHubRemoteUrl(const std::wstring& remoteUrl) {
         return L"";
     }
     return L"https://github.com/" + pathPart;
+}
+
+std::wstring DeriveRepositoryNameFromUrl(const std::wstring& remoteUrl) {
+    std::wstring value = Trim(remoteUrl);
+    if (value.empty()) {
+        return L"";
+    }
+    while (!value.empty() && (value.back() == L'/' || value.back() == L'\\')) {
+        value.pop_back();
+    }
+    const size_t pos = value.find_last_of(L"/:");
+    std::wstring name = pos == std::wstring::npos ? value : value.substr(pos + 1);
+    const std::wstring suffix = L".git";
+    if (name.size() > suffix.size() &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        name.erase(name.size() - suffix.size());
+    }
+    return name;
+}
+
+std::wstring BuildGitCommandText(const std::vector<std::wstring>& args) {
+    std::wstring text = L"git";
+    for (const auto& arg : args) {
+        text += L" ";
+        text += arg;
+    }
+    return text;
+}
+
+std::wstring NormalizeCloneRepositoryInput(const std::wstring& rawInput) {
+    std::wstring value = Trim(rawInput);
+    if (value.empty()) {
+        return L"";
+    }
+
+    const std::wstring gitClonePrefix = L"git clone ";
+    if (value.size() >= gitClonePrefix.size()) {
+        std::wstring lower = value;
+        std::transform(lower.begin(), lower.end(), lower.begin(), towlower);
+        if (lower.compare(0, gitClonePrefix.size(), gitClonePrefix) == 0) {
+            value = Trim(value.substr(gitClonePrefix.size()));
+        }
+    }
+
+    std::wstringstream stream(value);
+    std::vector<std::wstring> tokens;
+    std::wstring token;
+    while (stream >> token) {
+        tokens.push_back(token);
+    }
+
+    if (tokens.empty()) {
+        return L"";
+    }
+
+    if (tokens.size() == 1) {
+        return tokens.front();
+    }
+
+    size_t index = 0;
+    if (_wcsicmp(tokens[0].c_str(), L"git") == 0) {
+        ++index;
+    }
+    if (index < tokens.size() && _wcsicmp(tokens[index].c_str(), L"clone") == 0) {
+        ++index;
+    }
+    while (index < tokens.size() && !tokens[index].empty() && tokens[index][0] == L'-') {
+        ++index;
+    }
+
+    return index < tokens.size() ? tokens[index] : tokens.back();
 }
 
 Gdiplus::Bitmap* GetGitHubBitmap() {
@@ -184,6 +317,7 @@ void FreeProjectListItemData(HWND listView) {
 
 bool IsOwnerDrawButtonId(UINT id) {
     return id == IDC_BTN_ADD_FOLDER ||
+           id == IDC_BTN_CLONE ||
            id == IDC_BTN_STATUS ||
            id == IDC_BTN_COMMIT ||
            id == IDC_BTN_PUSH ||
@@ -368,6 +502,7 @@ struct AsyncGitCommandState {
     std::vector<std::wstring> args;
     bool refreshCommitsAfter = true;
     std::wstring cleanupFilePath;
+    std::wstring postSuccessProjectPath;
     HANDLE cancelEvent = nullptr;
     GitCommandResult result;
 };
@@ -379,6 +514,10 @@ struct AsyncCommitRefreshState {
     unsigned long long token = 0;
     std::vector<CommitInfo> previousCommits;
     std::vector<CommitInfo> commits;
+};
+
+struct AsyncGitOutputState {
+    std::wstring text;
 };
 
 struct DiffContentWindowState {
@@ -451,6 +590,34 @@ struct SquashComposeWindowState {
     HWND messageLabel = nullptr;
     HFONT uiFont = nullptr;
     WNDPROC editProc = nullptr;
+    bool accepted = false;
+};
+
+struct CloneWindowState {
+    HWND parent = nullptr;
+    std::wstring title = L"clone";
+    std::wstring repoUrl;
+    std::wstring targetDirectory;
+    HWND urlLabel = nullptr;
+    HWND urlEdit = nullptr;
+    HWND pathLabel = nullptr;
+    HWND pathEdit = nullptr;
+    HWND browseButton = nullptr;
+    HWND okButton = nullptr;
+    HWND cancelButton = nullptr;
+    HFONT uiFont = nullptr;
+    bool accepted = false;
+};
+
+struct DeleteBranchWindowState {
+    HWND parent = nullptr;
+    std::wstring selectedBranch;
+    std::vector<std::wstring> branches;
+    HWND hintLabel = nullptr;
+    HWND branchList = nullptr;
+    HWND deleteButton = nullptr;
+    HWND cancelButton = nullptr;
+    HFONT uiFont = nullptr;
     bool accepted = false;
 };
 
@@ -1539,6 +1706,217 @@ LRESULT CALLBACK SquashComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+LRESULT CALLBACK CloneWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<CloneWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<CloneWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->urlLabel = CreateWindowExW(0, L"STATIC", L"Repository URL", WS_CHILD | WS_VISIBLE,
+                                          0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->repoUrl.c_str(),
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4501), cs->hInstance, nullptr);
+        state->pathLabel = CreateWindowExW(0, L"STATIC", L"Save To", WS_CHILD | WS_VISIBLE,
+                                           0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->pathEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->targetDirectory.c_str(),
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY,
+                                          0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4502), cs->hInstance, nullptr);
+        state->browseButton = CreateWindowExW(0, L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4503), cs->hInstance, nullptr);
+        state->okButton = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                          0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
+        state->cancelButton = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+
+        HWND controls[] = {state->urlLabel, state->urlEdit, state->pathLabel, state->pathEdit,
+                           state->browseButton, state->okButton, state->cancelButton};
+        for (HWND control : controls) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        }
+        DarkTheme::ApplyDarkControlTheme(state->urlEdit);
+        DarkTheme::ApplyDarkControlTheme(state->pathEdit);
+        SetFocus(state->urlEdit);
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 12;
+            const int labelHeight = 20;
+            const int editHeight = 28;
+            const int buttonHeight = 32;
+            const int browseWidth = 92;
+            const int footerY = rc.bottom - padding - buttonHeight;
+            const int contentWidth = rc.right - padding * 2;
+            MoveWindow(state->urlLabel, padding, padding, contentWidth, labelHeight, TRUE);
+            MoveWindow(state->urlEdit, padding, padding + labelHeight + 4, contentWidth, editHeight, TRUE);
+            MoveWindow(state->pathLabel, padding, padding + 64, contentWidth, labelHeight, TRUE);
+            MoveWindow(state->pathEdit, padding, padding + 64 + labelHeight + 4, contentWidth - browseWidth - 8, editHeight, TRUE);
+            MoveWindow(state->browseButton, rc.right - padding - browseWidth, padding + 64 + labelHeight + 4, browseWidth, editHeight, TRUE);
+            MoveWindow(state->cancelButton, rc.right - padding - 96, footerY, 96, buttonHeight, TRUE);
+            MoveWindow(state->okButton, rc.right - padding - 200, footerY, 96, buttonHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == 4503) {
+            BROWSEINFOW info{};
+            info.hwndOwner = hwnd;
+            info.lpszTitle = L"Select clone destination";
+            info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            PIDLIST_ABSOLUTE itemId = SHBrowseForFolderW(&info);
+            if (itemId != nullptr) {
+                wchar_t pathBuffer[MAX_PATH] = {};
+                SHGetPathFromIDListW(itemId, pathBuffer);
+                CoTaskMemFree(itemId);
+                state->targetDirectory = pathBuffer;
+                SetWindowTextW(state->pathEdit, state->targetDirectory.c_str());
+            }
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == IDOK) {
+            wchar_t urlBuffer[2048] = {};
+            GetWindowTextW(state->urlEdit, urlBuffer, 2048);
+            state->repoUrl = urlBuffer;
+            wchar_t pathBuffer[MAX_PATH] = {};
+            GetWindowTextW(state->pathEdit, pathBuffer, MAX_PATH);
+            state->targetDirectory = pathBuffer;
+            state->accepted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::WindowBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::WindowBrush());
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_DESTROY:
+        if (state != nullptr && state->parent != nullptr && IsWindow(state->parent)) {
+            EnableWindow(state->parent, TRUE);
+            SetForegroundWindow(state->parent);
+            SetActiveWindow(state->parent);
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK DeleteBranchWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<DeleteBranchWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<DeleteBranchWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->hintLabel = CreateWindowExW(0, L"STATIC", L"Select a local branch to delete",
+                                           WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->branchList = CreateWindowExW(0, L"LISTBOX", L"",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
+                                            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4601), cs->hInstance, nullptr);
+        state->deleteButton = CreateWindowExW(0, L"BUTTON", L"Delete",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
+        state->cancelButton = CreateWindowExW(0, L"BUTTON", L"Cancel",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+
+        HWND controls[] = {state->hintLabel, state->branchList, state->deleteButton, state->cancelButton};
+        for (HWND control : controls) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        }
+
+        for (const auto& branch : state->branches) {
+            SendMessageW(state->branchList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(branch.c_str()));
+        }
+        if (!state->branches.empty()) {
+            SendMessageW(state->branchList, LB_SETCURSEL, 0, 0);
+        }
+        DarkTheme::ApplyDarkControlTheme(state->branchList);
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 12;
+            const int buttonHeight = 32;
+            MoveWindow(state->hintLabel, padding, padding, rc.right - padding * 2, 22, TRUE);
+            MoveWindow(state->branchList, padding, 40, rc.right - padding * 2, rc.bottom - 40 - padding * 2 - buttonHeight, TRUE);
+            MoveWindow(state->cancelButton, rc.right - padding - 96, rc.bottom - padding - buttonHeight, 96, buttonHeight, TRUE);
+            MoveWindow(state->deleteButton, rc.right - padding - 200, rc.bottom - padding - buttonHeight, 96, buttonHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == IDOK) {
+            const int index = static_cast<int>(SendMessageW(state->branchList, LB_GETCURSEL, 0, 0));
+            if (index >= 0 && index < static_cast<int>(state->branches.size())) {
+                state->selectedBranch = state->branches[index];
+                state->accepted = true;
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_DESTROY:
+        if (state != nullptr && state->parent != nullptr && IsWindow(state->parent)) {
+            EnableWindow(state->parent, TRUE);
+            SetForegroundWindow(state->parent);
+            SetActiveWindow(state->parent);
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
 LRESULT CALLBACK CommitDetailWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<CommitDetailWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (message) {
@@ -1876,6 +2254,24 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     squashClass.lpszClassName = kSquashComposeWindowClass;
     RegisterClassExW(&squashClass);
 
+    WNDCLASSEXW cloneClass{};
+    cloneClass.cbSize = sizeof(cloneClass);
+    cloneClass.lpfnWndProc = CloneWindowProc;
+    cloneClass.hInstance = instance_;
+    cloneClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cloneClass.hbrBackground = DarkTheme::WindowBrush();
+    cloneClass.lpszClassName = kCloneWindowClass;
+    RegisterClassExW(&cloneClass);
+
+    WNDCLASSEXW deleteBranchClass{};
+    deleteBranchClass.cbSize = sizeof(deleteBranchClass);
+    deleteBranchClass.lpfnWndProc = DeleteBranchWindowProc;
+    deleteBranchClass.hInstance = instance_;
+    deleteBranchClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    deleteBranchClass.hbrBackground = DarkTheme::WindowBrush();
+    deleteBranchClass.lpszClassName = kDeleteBranchWindowClass;
+    RegisterClassExW(&deleteBranchClass);
+
     const int windowWidth = std::max(projectStore_.GetWindowWidth(), kMinWindowWidth);
     const int windowHeight = std::max(projectStore_.GetWindowHeight(), kMinWindowHeight);
     const RECT centeredRect = CalculateCenteredWindowRect(windowWidth, windowHeight);
@@ -2042,8 +2438,30 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
         return 0;
     }
 
+    std::wstring pendingOutput;
+    ULONGLONG lastFlushTick = GetTickCount64();
+
+    auto flushOutput = [&]() {
+        if (pendingOutput.empty()) {
+            return;
+        }
+        auto* outputState = new AsyncGitOutputState();
+        outputState->text.swap(pendingOutput);
+        PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_OUTPUT, 0, reinterpret_cast<LPARAM>(outputState));
+    };
+
+    auto postOutput = [&](const std::wstring& text) {
+        pendingOutput += text;
+        const ULONGLONG now = GetTickCount64();
+        if (pendingOutput.size() >= 4096 || (now - lastFlushTick) >= 80) {
+            flushOutput();
+            lastFlushTick = now;
+        }
+    };
+
     for (const auto& preCommand : state->preCommands) {
-        state->result = GitRunner::RunGitCommand(state->repoPath, preCommand, state->cancelEvent);
+        state->result = GitRunner::RunGitCommand(state->repoPath, preCommand, state->cancelEvent, postOutput);
+        flushOutput();
         if (!state->result.success || state->result.cancelled) {
             if (!state->cleanupFilePath.empty()) {
                 DeleteFileW(state->cleanupFilePath.c_str());
@@ -2053,7 +2471,8 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
         }
     }
 
-    state->result = GitRunner::RunGitCommand(state->repoPath, state->args, state->cancelEvent);
+    state->result = GitRunner::RunGitCommand(state->repoPath, state->args, state->cancelEvent, postOutput);
+    flushOutput();
     if (!state->cleanupFilePath.empty()) {
         DeleteFileW(state->cleanupFilePath.c_str());
     }
@@ -2107,6 +2526,18 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
+    case WM_APP_GIT_COMMAND_OUTPUT: {
+        auto* state = reinterpret_cast<AsyncGitOutputState*>(lParam);
+        if (state != nullptr) {
+            pendingCommandOutput_ += state->text;
+            if (!commandOutputFlushScheduled_) {
+                SetTimer(hwnd_, kLogFlushTimerId, 50, nullptr);
+                commandOutputFlushScheduled_ = true;
+            }
+            delete state;
+        }
+        return 0;
+    }
     case WM_APP_GIT_COMMAND_DONE: {
         auto* state = reinterpret_cast<AsyncGitCommandState*>(lParam);
         if (state != nullptr) {
@@ -2117,6 +2548,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 currentCancelEvent_ = nullptr;
             }
             SetCommandUiState(false, state->result.cancelled ? L"Cancelled" : L"Ready");
+            FlushPendingCommandOutput();
             AppendCommandResult(state->result);
 
             const bool isPlainPushCommand =
@@ -2152,6 +2584,15 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
 
             const std::wstring selectedPath = GetSelectedProjectPath();
+            if (state->result.success && !state->postSuccessProjectPath.empty()) {
+                if (!projectStore_.Contains(state->postSuccessProjectPath)) {
+                    projectStore_.AddProject(state->postSuccessProjectPath);
+                    projectStore_.Save();
+                    LoadProjectsIntoList();
+                }
+                SelectProjectByPath(state->postSuccessProjectPath);
+                RefreshCurrentRepository();
+            }
             if (selectedPath == state->repoPath) {
                 if (state->refreshCommitsAfter) {
                     RefreshCommitList();
@@ -2167,6 +2608,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
+    case WM_TIMER:
+        if (wParam == kLogFlushTimerId) {
+            KillTimer(hwnd_, kLogFlushTimerId);
+            commandOutputFlushScheduled_ = false;
+            FlushPendingCommandOutput();
+            return 0;
+        }
+        break;
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
         info->ptMinTrackSize.x = kMinWindowWidth;
@@ -2191,6 +2640,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             DrawNormalMenuItem(dis);
             return TRUE;
         }
+        if (dis != nullptr && dis->CtlType == ODT_MENU && dis->itemID == IDM_COMMIT_COPY_HASH) {
+            DrawNormalMenuItem(dis);
+            return TRUE;
+        }
         break;
     }
     case WM_MEASUREITEM: {
@@ -2198,7 +2651,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (mis != nullptr && mis->CtlType == ODT_MENU &&
             (mis->itemID == IDM_COMMIT_RESET_HARD ||
              mis->itemID == IDM_COMMIT_RESET_SOFT ||
-             mis->itemID == IDM_COMMIT_EDIT_MESSAGE)) {
+             mis->itemID == IDM_COMMIT_EDIT_MESSAGE ||
+             mis->itemID == IDM_COMMIT_COPY_HASH)) {
             mis->itemWidth = 320;
             mis->itemHeight = 52;
             return TRUE;
@@ -2209,6 +2663,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         switch (LOWORD(wParam)) {
         case IDC_BTN_ADD_FOLDER:
             AddFolder();
+            return 0;
+        case IDC_BTN_CLONE:
+            RunClone();
             return 0;
         case IDC_BTN_STATUS:
             RunSimpleCommand({L"status", L"--short", L"--branch"}, false);
@@ -2236,8 +2693,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_BTN_STOP:
             if (commandRunning_ && currentCancelEvent_ != nullptr) {
+                stopRequested_ = true;
                 SetEvent(currentCancelEvent_);
-                SetCommandUiState(true, L"Stopping...");
+                baseStatusText_ = L"Stopping...";
+                if (statusLabel_ != nullptr) {
+                    SetWindowTextW(statusLabel_, baseStatusText_.c_str());
+                }
             }
             return 0;
         case IDM_PROJECT_REMOVE:
@@ -2264,12 +2725,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case IDM_COMMIT_RESET_HARD:
         case IDM_COMMIT_RESET_SOFT:
         case IDM_COMMIT_EDIT_MESSAGE:
+        case IDM_COMMIT_COPY_HASH:
             HandleCommitMenuCommand(LOWORD(wParam));
             return 0;
         default:
             if (LOWORD(wParam) == IDM_BRANCH_CREATE ||
                 LOWORD(wParam) == IDM_BRANCH_RENAME ||
                 LOWORD(wParam) == IDM_BRANCH_SQUASH ||
+                LOWORD(wParam) == IDM_BRANCH_DELETE ||
                 (LOWORD(wParam) >= IDM_BRANCH_BASE && LOWORD(wParam) < IDM_BRANCH_BASE + 200)) {
                 HandleBranchMenuCommand(LOWORD(wParam));
                 return 0;
@@ -2411,6 +2874,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 void MainWindow::CreateControls() {
     addFolderButton_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
                                        0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_ADD_FOLDER), instance_, nullptr);
+    cloneButton_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
+                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_CLONE), instance_, nullptr);
     projectList_ = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                    WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_LIST_PROJECTS), instance_, nullptr);
@@ -2442,6 +2907,8 @@ void MainWindow::CreateControls() {
                                         0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_OPEN_GITHUB), instance_, nullptr);
     statusLabel_ = CreateWindowExW(0, L"STATIC", L"Ready", WS_CHILD,
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_STATIC_STATUS), instance_, nullptr);
+    progressBar_ = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD,
+                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_PROGRESS_GIT), instance_, nullptr);
     stopButton_ = CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | BS_OWNERDRAW,
                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_STOP), instance_, nullptr);
 
@@ -2472,6 +2939,7 @@ void MainWindow::CreateControls() {
     ShowScrollBar(logEdit_, SB_VERT, FALSE);
 
     SetButtonText(IDC_BTN_ADD_FOLDER, IDS_BTN_ADD_FOLDER);
+    SetButtonText(IDC_BTN_CLONE, IDS_BTN_CLONE);
     SetButtonText(IDC_BTN_STATUS, IDS_BTN_STATUS);
     SetButtonText(IDC_BTN_COMMIT, IDS_BTN_COMMIT);
     SetButtonText(IDC_BTN_PUSH, IDS_BTN_PUSH);
@@ -2481,6 +2949,11 @@ void MainWindow::CreateControls() {
     SetButtonText(IDC_BTN_REMOTE, IDS_BTN_REMOTE);
     SetWindowTextW(buttonOpenGitHub_, L"");
     SetWindowTextW(statusLabel_, L"Ready");
+    SendMessageW(progressBar_, PBM_SETRANGE32, 0, 100);
+    SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
+    SendMessageW(progressBar_, PBM_SETBKCOLOR, 0, DarkTheme::WindowBackground());
+    SendMessageW(progressBar_, PBM_SETBARCOLOR, 0, RGB(76, 175, 80));
+    ShowWindow(progressBar_, SW_HIDE);
     SetWindowTextW(stopButton_, L"Stop");
     EnableWindow(stopButton_, FALSE);
     UpdateWindowTitle();
@@ -2489,7 +2962,7 @@ void MainWindow::CreateControls() {
 
 void MainWindow::ShowControls() {
     HWND controls[] = {
-        addFolderButton_, projectList_, commitList_, logEdit_, logScrollBar_,
+        addFolderButton_, cloneButton_, projectList_, commitList_, logEdit_, logScrollBar_,
         buttonStatus_, buttonCommit_, buttonPush_,
         buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_,
         statusLabel_, stopButton_
@@ -2497,13 +2970,28 @@ void MainWindow::ShowControls() {
     for (HWND control : controls) {
         ShowWindow(control, SW_SHOW);
     }
+    ShowWindow(progressBar_, SW_HIDE);
     ShowScrollBar(logEdit_, SB_VERT, FALSE);
 }
 
 void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText) {
     const std::wstring text = statusText.empty() ? (running ? L"Running..." : L"Ready") : statusText;
+    baseStatusText_ = text;
+    if (running) {
+        stopRequested_ = false;
+        pendingCommandLineBuffer_.clear();
+        if (progressBar_ != nullptr) {
+            SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
+            ShowWindow(progressBar_, SW_HIDE);
+        }
+    }
     if (statusLabel_ != nullptr) {
         SetWindowTextW(statusLabel_, text.c_str());
+    }
+    if (!running) {
+        stopRequested_ = false;
+        cloneProgressEnabled_ = false;
+        ResetGitProgress();
     }
     UpdateCommandButtonsEnabled(running);
     if (stopButton_ != nullptr) {
@@ -2513,8 +3001,11 @@ void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText)
 
 void MainWindow::UpdateCommandButtonsEnabled(bool running) {
     const BOOL enabled = running ? FALSE : TRUE;
+    const std::wstring selectedPath = GetSelectedProjectPath();
+    const bool hasSelectedGitRepo =
+        !running && !selectedPath.empty() && GitRunner::IsGitRepository(selectedPath);
     HWND buttons[] = {
-        buttonStatus_, buttonCommit_, buttonPush_,
+        cloneButton_, buttonStatus_, buttonCommit_, buttonPush_,
         buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_
     };
     for (HWND button : buttons) {
@@ -2524,8 +3015,7 @@ void MainWindow::UpdateCommandButtonsEnabled(bool running) {
     }
 
     if (buttonOpenGitHub_ != nullptr) {
-        const bool hasGitHubRemote = !running && !GetGitHubWebUrlForRepo(GetSelectedProjectPath()).empty();
-        EnableWindow(buttonOpenGitHub_, hasGitHubRemote ? TRUE : FALSE);
+        EnableWindow(buttonOpenGitHub_, hasSelectedGitRepo ? TRUE : FALSE);
     }
 }
 
@@ -2538,7 +3028,12 @@ void MainWindow::LayoutControls(int width, int height) {
     const int splitGap = kPadding;
     const int paneHeight = (totalContentHeight - splitGap) / 2;
 
-    MoveWindow(addFolderButton_, kPadding, kPadding, kLeftPanelWidth - kPadding, 34, TRUE);
+    const int leftButtonsGap = 8;
+    const int leftButtonsWidth = kLeftPanelWidth - kPadding;
+    const int addButtonWidth = (leftButtonsWidth - leftButtonsGap) / 2;
+    const int cloneButtonWidth = leftButtonsWidth - addButtonWidth - leftButtonsGap;
+    MoveWindow(addFolderButton_, kPadding, kPadding, addButtonWidth, 34, TRUE);
+    MoveWindow(cloneButton_, kPadding + addButtonWidth + leftButtonsGap, kPadding, cloneButtonWidth, 34, TRUE);
     MoveWindow(projectList_, kPadding, 54, kLeftPanelWidth - kPadding, height - 66, TRUE);
     UpdateProjectListColumnWidth(kLeftPanelWidth - kPadding);
 
@@ -2559,7 +3054,13 @@ void MainWindow::LayoutControls(int width, int height) {
     MoveWindow(logScrollBar_, rightX + rightWidth - kLogScrollBarWidth, logTop, kLogScrollBarWidth, paneHeight, TRUE);
     const int statusTop = contentBottom + kPadding;
     const int stopWidth = 92;
-    MoveWindow(statusLabel_, rightX, statusTop, rightWidth - stopWidth - 12, kStatusBarHeight, TRUE);
+    const int progressWidth = std::max(220, rightWidth / 2);
+    const int progressHeight = 18;
+    const int statusWidth = rightWidth - stopWidth - progressWidth - 24;
+    MoveWindow(statusLabel_, rightX, statusTop, std::max(120, statusWidth), kStatusBarHeight, TRUE);
+    MoveWindow(progressBar_, rightX + std::max(120, statusWidth) + 12,
+               statusTop + (kStatusBarHeight - progressHeight) / 2,
+               progressWidth, progressHeight, TRUE);
     MoveWindow(stopButton_, rightX + rightWidth - stopWidth, statusTop, stopWidth, kStatusBarHeight, TRUE);
     UpdateLogScrollBar();
 }
@@ -2618,7 +3119,7 @@ void MainWindow::ApplyFonts() {
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     g_menuFont = menuFont_;
-    HWND controls[] = {addFolderButton_, commitList_, logEdit_, statusLabel_, stopButton_,
+    HWND controls[] = {addFolderButton_, cloneButton_, commitList_, logEdit_, statusLabel_, stopButton_,
                        buttonStatus_, buttonCommit_, buttonPush_,
                        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_};
     for (HWND control : controls) {
@@ -2747,6 +3248,13 @@ void MainWindow::ShowCommitPlaceholder(const std::wstring& message) {
 }
 
 void MainWindow::ClearLog() {
+    if (commandOutputFlushScheduled_) {
+        KillTimer(hwnd_, kLogFlushTimerId);
+        commandOutputFlushScheduled_ = false;
+    }
+    pendingCommandOutput_.clear();
+    pendingCommandLineBuffer_.clear();
+    currentCommandOutputColor_ = kLogDefaultText;
     SetWindowTextW(logEdit_, L"");
     UpdateLogScrollBar();
 }
@@ -2766,6 +3274,17 @@ void MainWindow::AppendLog(const std::wstring& text) {
 }
 
 void MainWindow::AppendLogRichText(const std::wstring& text, COLORREF color) {
+    SendMessageW(logEdit_, WM_SETREDRAW, FALSE, 0);
+    const LRESULT currentLength = SendMessageW(logEdit_, WM_GETTEXTLENGTH, 0, 0);
+    if (currentLength > static_cast<LRESULT>(kMaxLogChars)) {
+        const size_t trimChars = static_cast<size_t>(currentLength) - kLogTrimTargetChars;
+        CHARRANGE trimRange{};
+        trimRange.cpMin = 0;
+        trimRange.cpMax = static_cast<LONG>(trimChars);
+        SendMessageW(logEdit_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&trimRange));
+        SendMessageW(logEdit_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+    }
+
     CHARRANGE range{-1, -1};
     SendMessageW(logEdit_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
 
@@ -2777,55 +3296,123 @@ void MainWindow::AppendLogRichText(const std::wstring& text, COLORREF color) {
     SendMessageW(logEdit_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
     SendMessageW(logEdit_, WM_VSCROLL, MAKEWPARAM(SB_BOTTOM, 0), 0);
     SendMessageW(logEdit_, EM_SCROLLCARET, 0, 0);
+    SendMessageW(logEdit_, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(logEdit_, nullptr, FALSE);
     UpdateLogScrollBar();
 }
 
-void MainWindow::AppendCommandResult(const GitCommandResult& result) {
-    AppendLog(L"$ " + result.commandLine);
-    if (!result.output.empty()) {
-        const std::wstring output = result.output;
-        std::wstring buffer;
-        COLORREF currentColor = kLogDefaultText;
+void MainWindow::AppendCommandOutputChunk(const std::wstring& text) {
+    std::wstring rawBuffer = pendingCommandLineBuffer_;
+    pendingCommandLineBuffer_.clear();
+    std::wstring visibleBuffer;
 
-        auto flushBuffer = [this, &buffer, &currentColor]() {
-            if (!buffer.empty()) {
-                AppendLogRichText(buffer, currentColor);
-                buffer.clear();
-            }
-        };
-
-        for (size_t i = 0; i < output.size(); ++i) {
-            const wchar_t ch = output[i];
-            if (ch == L'\x001b' && i + 1 < output.size() && output[i + 1] == L'[') {
-                flushBuffer();
-                i += 2;
-                std::wstring codeText;
-                while (i < output.size() && output[i] != L'm') {
-                    codeText += output[i];
-                    ++i;
-                }
-
-                std::wstringstream codeStream(codeText);
-                std::wstring segment;
-                while (std::getline(codeStream, segment, L';')) {
-                    if (segment.empty()) {
-                        continue;
-                    }
-                    const int code = _wtoi(segment.c_str());
-                    if (code == 0 || code == 39) {
-                        currentColor = kLogDefaultText;
-                    } else {
-                        currentColor = MapAnsiColor(code, currentColor);
-                    }
-                }
-                continue;
-            }
-            if (ch != L'\r') {
-                buffer.push_back(ch);
-            }
+    auto flushVisible = [this, &visibleBuffer]() {
+        if (!visibleBuffer.empty()) {
+            AppendLogRichText(visibleBuffer, currentCommandOutputColor_);
+            visibleBuffer.clear();
         }
-        flushBuffer();
+    };
+
+    auto handleCompletedLine = [this, &visibleBuffer, &flushVisible](std::wstring line) {
+        int percent = 0;
+        std::wstring label;
+        if (cloneProgressEnabled_ && TryParseGitProgressLine(line, &percent, &label)) {
+            flushVisible();
+            if (!stopRequested_ && progressBar_ != nullptr) {
+                ShowWindow(progressBar_, SW_SHOW);
+                SendMessageW(progressBar_, PBM_SETPOS, percent, 0);
+            }
+            if (!stopRequested_ && statusLabel_ != nullptr) {
+                std::wstring status = label + L" " + std::to_wstring(percent) + L"%";
+                SetWindowTextW(statusLabel_, status.c_str());
+            }
+            return;
+        }
+
+        if (progressBar_ != nullptr && IsWindowVisible(progressBar_) && Trim(line).empty()) {
+            return;
+        }
+
+        visibleBuffer += line;
+        visibleBuffer += L"\r\n";
+    };
+
+    for (size_t i = 0; i < text.size(); ++i) {
+        const wchar_t ch = text[i];
+        if (ch == L'\x001b' && i + 1 < text.size() && text[i + 1] == L'[') {
+            i += 2;
+            std::wstring codeText;
+            while (i < text.size() && text[i] != L'm') {
+                codeText += text[i];
+                ++i;
+            }
+
+            std::wstringstream codeStream(codeText);
+            std::wstring segment;
+            while (std::getline(codeStream, segment, L';')) {
+                if (segment.empty()) {
+                    continue;
+                }
+                const int code = _wtoi(segment.c_str());
+                if (code == 0 || code == 39) {
+                    currentCommandOutputColor_ = kLogDefaultText;
+                } else {
+                    currentCommandOutputColor_ = MapAnsiColor(code, currentCommandOutputColor_);
+                }
+            }
+            continue;
+        }
+
+        if (ch == L'\r') {
+            if (i + 1 >= text.size() || text[i + 1] != L'\n') {
+                handleCompletedLine(rawBuffer);
+                rawBuffer.clear();
+            }
+            continue;
+        }
+
+        if (ch == L'\n') {
+            handleCompletedLine(rawBuffer);
+            rawBuffer.clear();
+            continue;
+        }
+
+        rawBuffer.push_back(ch);
     }
+
+    flushVisible();
+    pendingCommandLineBuffer_ = rawBuffer;
+}
+
+void MainWindow::FlushPendingCommandOutput() {
+    if (pendingCommandOutput_.empty()) {
+        return;
+    }
+    std::wstring text;
+    text.swap(pendingCommandOutput_);
+    AppendCommandOutputChunk(text);
+}
+
+void MainWindow::ResetGitProgress() {
+    pendingCommandLineBuffer_.clear();
+    if (progressBar_ != nullptr) {
+        SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
+        ShowWindow(progressBar_, SW_HIDE);
+    }
+    if (statusLabel_ != nullptr) {
+        SetWindowTextW(statusLabel_, baseStatusText_.c_str());
+    }
+}
+
+void MainWindow::AppendCommandResult(const GitCommandResult& result) {
+    if (!result.outputStreamed) {
+        AppendLog(L"$ " + result.commandLine);
+        if (!result.output.empty()) {
+            currentCommandOutputColor_ = kLogDefaultText;
+            AppendCommandOutputChunk(result.output);
+        }
+    }
+    currentCommandOutputColor_ = kLogDefaultText;
     if (result.cancelled) {
         AppendLog(L"Command cancelled.");
     } else {
@@ -2961,6 +3548,7 @@ void MainWindow::ShowCommitContextMenu(POINT screenPoint) {
     if (CanEditSelectedCommitMessage()) {
         InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_EDIT_MESSAGE, L"edit commit message", insertIndex++);
     }
+    InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_COPY_HASH, L"copy commit hash", insertIndex++);
     InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_HARD, L"git reset here (Hard)", insertIndex++);
     InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_SOFT, L"git reset here (Soft)", insertIndex++);
     TrackPopupMenu(commitContextMenu_, TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
@@ -3035,14 +3623,8 @@ std::wstring MainWindow::GetGitHubWebUrlForRepo(const std::wstring& repoPath) co
 
 void MainWindow::OpenCurrentGitHubRepo() {
     const std::wstring url = GetGitHubWebUrlForRepo(GetSelectedProjectPath());
-    if (url.empty()) {
-        MessageBoxW(hwnd_, L"The selected repository does not have a GitHub origin remote.",
-                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
-        UpdateCommandButtonsEnabled(commandRunning_);
-        return;
-    }
-
-    ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    const std::wstring targetUrl = url.empty() ? L"https://github.com/new" : url;
+    ShellExecuteW(hwnd_, L"open", targetUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 void MainWindow::StartAsyncGitCommand(
@@ -3098,6 +3680,8 @@ void MainWindow::RunSimpleCommand(
     }
 
     commandRunning_ = true;
+    cloneProgressEnabled_ = false;
+    stopRequested_ = false;
     currentCancelEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (currentCancelEvent_ == nullptr) {
         commandRunning_ = false;
@@ -3107,6 +3691,8 @@ void MainWindow::RunSimpleCommand(
     }
     SetCommandUiState(true, L"Running...");
     AppendLog(L"Running git command in background...");
+    currentCommandOutputColor_ = kLogDefaultText;
+    AppendLog(L"$ " + BuildGitCommandText(args));
     StartAsyncGitCommand(path, args, refreshCommitsAfter, cleanupFilePath, preCommands);
 }
 
@@ -3176,6 +3762,105 @@ void MainWindow::RunGitInit(const std::wstring& requestedPath) {
     RefreshCurrentRepository();
     MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_INIT_SUCCESS).c_str(),
                 LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+}
+
+void MainWindow::RunClone() {
+    if (commandRunning_) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMAND_RUNNING).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    auto* state = new CloneWindowState();
+    state->parent = hwnd_;
+    state->uiFont = uiFont_;
+    wchar_t cwd[MAX_PATH] = {};
+    GetCurrentDirectoryW(MAX_PATH, cwd);
+    state->targetDirectory = cwd;
+
+    RECT parentRect{};
+    GetWindowRect(hwnd_, &parentRect);
+    const int width = 680;
+    const int height = 210;
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(hwnd_, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kCloneWindowClass,
+        L"clone",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
+        x, y, width, height,
+        nullptr, nullptr, instance_, state);
+    if (dialog == nullptr) {
+        EnableWindow(hwnd_, TRUE);
+        delete state;
+        return;
+    }
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool accepted = state->accepted;
+    const std::wstring repoUrl = NormalizeCloneRepositoryInput(state->repoUrl);
+    const std::wstring targetDirectory = Trim(state->targetDirectory);
+    delete state;
+
+    if (!accepted) {
+        return;
+    }
+    if (repoUrl.empty() || targetDirectory.empty()) {
+        MessageBoxW(hwnd_, L"Repository URL and save location cannot be empty.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+        return;
+    }
+
+    commandRunning_ = true;
+    cloneProgressEnabled_ = true;
+    stopRequested_ = false;
+    currentCancelEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (currentCancelEvent_ == nullptr) {
+        commandRunning_ = false;
+        MessageBoxW(hwnd_, L"Failed to create cancel event.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONERROR);
+        return;
+    }
+
+    SetCommandUiState(true, L"Running...");
+    AppendLog(L"Running git command in background...");
+    currentCommandOutputColor_ = kLogDefaultText;
+    AppendLog(L"$ " + BuildGitCommandText({L"clone", L"--progress", repoUrl}));
+
+    const std::wstring repoName = DeriveRepositoryNameFromUrl(repoUrl);
+    auto* commandState = new AsyncGitCommandState();
+    commandState->hwnd = hwnd_;
+    commandState->repoPath = targetDirectory;
+    commandState->args = {L"clone", L"--progress", repoUrl};
+    commandState->refreshCommitsAfter = false;
+    commandState->cleanupFilePath.clear();
+    commandState->cancelEvent = currentCancelEvent_;
+    if (!repoName.empty()) {
+        commandState->postSuccessProjectPath = (std::filesystem::path(targetDirectory) / repoName).wstring();
+    }
+
+    const HANDLE thread = CreateThread(nullptr, 0, MainWindow::AsyncGitCommandThread, commandState, 0, nullptr);
+    if (thread == nullptr) {
+        delete commandState;
+        commandRunning_ = false;
+        CloseHandle(currentCancelEvent_);
+        currentCancelEvent_ = nullptr;
+        SetCommandUiState(false, L"Ready");
+        MessageBoxW(hwnd_, L"Failed to start background git task.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONERROR);
+        return;
+    }
+    CloseHandle(thread);
 }
 
 void MainWindow::RunCommit() {
@@ -3299,6 +3984,66 @@ void MainWindow::RunSquashLocalCommits() {
         {{L"reset", L"--soft", resetTarget}});
 }
 
+void MainWindow::RunDeleteBranch() {
+    const std::wstring currentBranch = GitRunner::GetCurrentBranch(GetSelectedProjectPath());
+    std::vector<std::wstring> branches;
+    for (const auto& branch : cachedBranches_) {
+        if (branch != currentBranch) {
+            branches.push_back(branch);
+        }
+    }
+
+    if (branches.empty()) {
+        MessageBoxW(hwnd_, L"No deletable local branches are available.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    auto* state = new DeleteBranchWindowState();
+    state->parent = hwnd_;
+    state->branches = std::move(branches);
+    state->uiFont = uiFont_;
+
+    RECT parentRect{};
+    GetWindowRect(hwnd_, &parentRect);
+    const int width = 520;
+    const int height = 380;
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(hwnd_, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kDeleteBranchWindowClass,
+        L"Delete Branch",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
+        x, y, width, height,
+        nullptr, nullptr, instance_, state);
+    if (dialog == nullptr) {
+        EnableWindow(hwnd_, TRUE);
+        delete state;
+        return;
+    }
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool accepted = state->accepted;
+    const std::wstring branchName = state->selectedBranch;
+    delete state;
+
+    if (!accepted || branchName.empty()) {
+        return;
+    }
+
+    RunSimpleCommand({L"branch", L"-D", branchName}, true);
+}
+
 void MainWindow::ShowBranchMenu() {
     const std::wstring path = GetSelectedProjectPath();
     if (path.empty()) {
@@ -3319,6 +4064,7 @@ void MainWindow::ShowBranchMenu() {
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_CREATE, L"+ Create Branch");
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_RENAME, L"Rename Current Branch");
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_SQUASH, L"Squash Local Commits");
+    AppendMenuW(menu, MF_STRING, IDM_BRANCH_DELETE, L"Delete Branch");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     for (size_t i = 0; i < cachedBranches_.size(); ++i) {
         UINT flags = MF_STRING;
@@ -3373,6 +4119,11 @@ void MainWindow::HandleBranchMenuCommand(UINT commandId) {
         return;
     }
 
+    if (commandId == IDM_BRANCH_DELETE) {
+        RunDeleteBranch();
+        return;
+    }
+
     const size_t index = commandId - IDM_BRANCH_BASE;
     if (index < cachedBranches_.size()) {
         RunSimpleCommand({L"checkout", cachedBranches_[index]}, true);
@@ -3391,9 +4142,16 @@ void MainWindow::ShowRemoteMenu() {
 }
 
 void MainWindow::HandleRemoteMenuCommand(UINT) {
+    const std::wstring path = GetSelectedProjectPath();
+    std::wstring initialValue;
+    const GitCommandResult getResult = GitRunner::RunGitCommand(path, {L"remote", L"get-url", L"origin"});
+    if (getResult.success) {
+        initialValue = Trim(getResult.output);
+    }
+
     bool accepted = false;
     const std::wstring remoteUrl = Trim(PromptForText(
-        IDS_MSG_REMOTE_TITLE, IDS_MSG_REMOTE_PROMPT, L"", false, &accepted));
+        IDS_MSG_REMOTE_TITLE, IDS_MSG_REMOTE_PROMPT, initialValue, false, &accepted));
     if (!accepted) {
         return;
     }
@@ -3403,8 +4161,6 @@ void MainWindow::HandleRemoteMenuCommand(UINT) {
         return;
     }
 
-    const std::wstring path = GetSelectedProjectPath();
-    const GitCommandResult getResult = GitRunner::RunGitCommand(path, {L"remote", L"get-url", L"origin"});
     if (getResult.success) {
         AppendCommandResult(GitRunner::RunGitCommand(path, {L"remote", L"set-url", L"origin", remoteUrl}));
     } else {
@@ -3447,6 +4203,28 @@ bool MainWindow::CanEditSelectedCommitMessage() const {
 void MainWindow::HandleCommitMenuCommand(UINT commandId) {
     const std::wstring hash = GetSelectedCommitHash();
     if (hash.empty()) {
+        return;
+    }
+
+    if (commandId == IDM_COMMIT_COPY_HASH) {
+        if (OpenClipboard(hwnd_)) {
+            EmptyClipboard();
+            const size_t bytes = (hash.size() + 1) * sizeof(wchar_t);
+            HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            if (memory != nullptr) {
+                void* locked = GlobalLock(memory);
+                if (locked != nullptr) {
+                    memcpy(locked, hash.c_str(), bytes);
+                    GlobalUnlock(memory);
+                    SetClipboardData(CF_UNICODETEXT, memory);
+                    memory = nullptr;
+                }
+            }
+            if (memory != nullptr) {
+                GlobalFree(memory);
+            }
+            CloseClipboard();
+        }
         return;
     }
 

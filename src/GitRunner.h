@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,7 @@ struct GitCommandResult {
     int exitCode = -1;
     bool success = false;
     bool cancelled = false;
+    bool outputStreamed = false;
     std::wstring commandLine;
     std::wstring output;
 };
@@ -36,7 +38,8 @@ public:
     static GitCommandResult RunGitCommand(
         const std::wstring& repoPath,
         const std::vector<std::wstring>& args,
-        HANDLE cancelEvent = nullptr);
+        HANDLE cancelEvent = nullptr,
+        const std::function<void(const std::wstring&)>& outputCallback = {});
 
     static std::vector<CommitInfo> GetRecentCommits(
         const std::wstring& repoPath,

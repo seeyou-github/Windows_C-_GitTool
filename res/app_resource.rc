@@ -19,6 +19,7 @@ BEGIN
     IDS_BTN_BRANCH "branch"
     IDS_BTN_REMOTE "remote"
     IDS_BTN_OPEN_GITHUB "Open GitHub"
+    IDS_BTN_CLONE "clone"
     IDS_COL_HASH "Hash"
     IDS_COL_MESSAGE "Message"
     IDS_COL_AUTHOR "Author"

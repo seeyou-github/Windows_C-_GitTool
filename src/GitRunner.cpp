@@ -115,7 +115,8 @@ bool GitRunner::IsGitRepository(const std::wstring& repoPath) {
 GitCommandResult GitRunner::RunGitCommand(
     const std::wstring& repoPath,
     const std::vector<std::wstring>& args,
-    HANDLE cancelEvent) {
+    HANDLE cancelEvent,
+    const std::function<void(const std::wstring&)>& outputCallback) {
     GitCommandResult result;
     result.commandLine = L"git " + JoinArguments(args);
 
@@ -175,6 +176,10 @@ GitCommandResult GitRunner::RunGitCommand(
             DWORD bytesRead = 0;
             if (ReadFile(readPipe, temp, toRead, &bytesRead, nullptr) && bytesRead > 0) {
                 outputBuffer.append(temp, temp + bytesRead);
+                if (outputCallback) {
+                    outputCallback(Utf8ToWide(std::string(temp, temp + bytesRead)));
+                    result.outputStreamed = true;
+                }
             }
             continue;
         }
@@ -192,6 +197,10 @@ GitCommandResult GitRunner::RunGitCommand(
     DWORD bytesRead = 0;
     while (ReadFile(readPipe, temp, sizeof(temp), &bytesRead, nullptr) && bytesRead > 0) {
         outputBuffer.append(temp, temp + bytesRead);
+        if (outputCallback) {
+            outputCallback(Utf8ToWide(std::string(temp, temp + bytesRead)));
+            result.outputStreamed = true;
+        }
     }
 
     DWORD exitCode = 1;

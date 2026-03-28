@@ -40,12 +40,16 @@ private:
     void ClearLog();
     void AppendLog(const std::wstring& text);
     void AppendLogRichText(const std::wstring& text, COLORREF color);
+    void AppendCommandOutputChunk(const std::wstring& text);
+    void FlushPendingCommandOutput();
+    void ResetGitProgress();
     void AppendCommandResult(const GitCommandResult& result);
     void SelectProjectByPath(const std::wstring& path);
     std::wstring GetSelectedProjectPath() const;
     std::wstring GetSelectedCommitHash() const;
     std::wstring GetSelectedProjectDisplayName() const;
     void AddFolder();
+    void RunClone();
     void RemoveSelectedProject();
     void ShowProjectContextMenu(POINT screenPoint);
     void ShowCommitContextMenu(POINT screenPoint);
@@ -67,6 +71,7 @@ private:
     void RunGitInit(const std::wstring& repoPath = L"");
     void RunCommit();
     void RunSquashLocalCommits();
+    void RunDeleteBranch();
     void ShowBranchMenu();
     void HandleBranchMenuCommand(UINT commandId);
     void ShowRemoteMenu();
@@ -98,6 +103,7 @@ private:
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
     HWND addFolderButton_ = nullptr;
+    HWND cloneButton_ = nullptr;
     HWND projectList_ = nullptr;
     HWND commitList_ = nullptr;
     HWND logEdit_ = nullptr;
@@ -112,6 +118,7 @@ private:
     HWND buttonOpenGitHub_ = nullptr;
     HWND statusLabel_ = nullptr;
     HWND stopButton_ = nullptr;
+    HWND progressBar_ = nullptr;
     HFONT uiFont_ = nullptr;
     HFONT projectListFont_ = nullptr;
     HFONT commitListFont_ = nullptr;
@@ -131,4 +138,11 @@ private:
     HANDLE currentCancelEvent_ = nullptr;
     unsigned long long commitRefreshToken_ = 0;
     std::wstring currentProjectPath_;
+    COLORREF currentCommandOutputColor_ = RGB(170, 176, 184);
+    std::wstring pendingCommandOutput_;
+    bool commandOutputFlushScheduled_ = false;
+    std::wstring pendingCommandLineBuffer_;
+    std::wstring baseStatusText_ = L"Ready";
+    bool cloneProgressEnabled_ = false;
+    bool stopRequested_ = false;
 };
