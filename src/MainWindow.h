@@ -53,6 +53,7 @@ private:
     void ShowRemoteMenu();
     void HandleRemoteMenuCommand(UINT commandId);
     void HandleCommitMenuCommand(UINT commandId);
+    bool CanEditSelectedCommitMessage() const;
     void SetButtonText(int controlId, int stringId);
     void SetWindowTextFromString(int stringId);
     void UpdateWindowTitle();

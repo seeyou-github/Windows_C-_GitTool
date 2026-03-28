@@ -252,6 +252,7 @@ struct PromptDialogState {
     std::wstring text;
     bool multiline = false;
     bool accepted = false;
+    WNDPROC editProc = nullptr;
 };
 
 struct DiffContentWindowState {
@@ -603,6 +604,20 @@ LRESULT CALLBACK DiffEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
     return result;
 }
 
+LRESULT CALLBACK PromptEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    HWND dialog = GetParent(hwnd);
+    auto* state = reinterpret_cast<PromptDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
+    if (state == nullptr || state->editProc == nullptr) {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    if (message == WM_GETDLGCODE) {
+        return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam) | DLGC_WANTALLKEYS;
+    }
+
+    return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam);
+}
+
 std::wstring FormatCommitSummary(const std::wstring& rawDetails) {
     std::vector<std::wstring> parts;
     size_t start = 0;
@@ -931,6 +946,14 @@ INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         SetDlgItemTextW(hwnd, 1001, state->prompt.c_str());
         SetDlgItemTextW(hwnd, 1002, state->text.c_str());
         SendDlgItemMessageW(hwnd, 1002, EM_SETLIMITTEXT, 8192, 0);
+        if (state->multiline) {
+            HWND edit = GetDlgItem(hwnd, 1002);
+            state->editProc = reinterpret_cast<WNDPROC>(
+                SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(PromptEditProc)));
+            SendMessageW(hwnd, DM_SETDEFID, 0, 0);
+            SetFocus(edit);
+            return FALSE;
+        }
         HWND parent = GetParent(hwnd);
         if (parent != nullptr) {
             RECT parentRect{};
@@ -1014,9 +1037,9 @@ std::vector<BYTE> BuildPromptDialogTemplate(bool multiline) {
 
     if (multiline) {
         addControl(WS_CHILD | WS_VISIBLE, 8, 8, 236, 10, 1001, 0x0082, L"Prompt");
-        addControl(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP,
+        addControl(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP,
                    8, 24, 236, 62, 1002, 0x0081, L"");
-        addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 108, 96, 60, 14, IDOK, 0x0080, L"OK");
+        addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 108, 96, 60, 14, IDOK, 0x0080, L"OK");
         addControl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 184, 96, 60, 14, IDCANCEL, 0x0080, L"Cancel");
     } else {
         addControl(WS_CHILD | WS_VISIBLE, 8, 8, 200, 10, 1001, 0x0082, L"Prompt");
@@ -1274,12 +1297,18 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             DrawNormalMenuItem(dis);
             return TRUE;
         }
+        if (dis != nullptr && dis->CtlType == ODT_MENU && dis->itemID == IDM_COMMIT_EDIT_MESSAGE) {
+            DrawNormalMenuItem(dis);
+            return TRUE;
+        }
         break;
     }
     case WM_MEASUREITEM: {
         auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
         if (mis != nullptr && mis->CtlType == ODT_MENU &&
-            (mis->itemID == IDM_COMMIT_RESET_HARD || mis->itemID == IDM_COMMIT_RESET_SOFT)) {
+            (mis->itemID == IDM_COMMIT_RESET_HARD ||
+             mis->itemID == IDM_COMMIT_RESET_SOFT ||
+             mis->itemID == IDM_COMMIT_EDIT_MESSAGE)) {
             mis->itemWidth = 320;
             mis->itemHeight = 52;
             return TRUE;
@@ -1339,6 +1368,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDM_COMMIT_RESET_HARD:
         case IDM_COMMIT_RESET_SOFT:
+        case IDM_COMMIT_EDIT_MESSAGE:
             HandleCommitMenuCommand(LOWORD(wParam));
             return 0;
         default:
@@ -1930,8 +1960,12 @@ void MainWindow::ShowCommitContextMenu(POINT screenPoint) {
     }
 
     commitContextMenu_ = CreatePopupMenu();
-    InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_HARD, L"git reset here (Hard)", 0);
-    InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_SOFT, L"git reset here (Soft)", 1);
+    UINT insertIndex = 0;
+    if (CanEditSelectedCommitMessage()) {
+        InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_EDIT_MESSAGE, L"edit commit message", insertIndex++);
+    }
+    InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_HARD, L"git reset here (Hard)", insertIndex++);
+    InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_SOFT, L"git reset here (Soft)", insertIndex++);
     TrackPopupMenu(commitContextMenu_, TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
 }
 
@@ -2178,9 +2212,75 @@ void MainWindow::HandleRemoteMenuCommand(UINT) {
                 LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
 }
 
+bool MainWindow::CanEditSelectedCommitMessage() const {
+    const std::wstring path = GetSelectedProjectPath();
+    const std::wstring selectedHash = GetSelectedCommitHash();
+    if (path.empty() || selectedHash.empty()) {
+        return false;
+    }
+
+    const GitCommandResult headResult = GitRunner::RunGitCommand(path, {L"rev-parse", L"HEAD"});
+    if (!headResult.success) {
+        return false;
+    }
+
+    const std::wstring headHash = Trim(headResult.output);
+    if (headHash.empty() || selectedHash != headHash.substr(0, std::min(selectedHash.size(), headHash.size()))) {
+        return false;
+    }
+
+    const GitCommandResult upstreamResult = GitRunner::RunGitCommand(path, {L"rev-parse", L"--abbrev-ref", L"@{upstream}"});
+    if (!upstreamResult.success) {
+        return true;
+    }
+
+    const GitCommandResult aheadResult = GitRunner::RunGitCommand(path, {L"rev-list", L"--count", L"@{upstream}..HEAD"});
+    if (!aheadResult.success) {
+        return false;
+    }
+
+    return _wtoi(Trim(aheadResult.output).c_str()) > 0;
+}
+
 void MainWindow::HandleCommitMenuCommand(UINT commandId) {
     const std::wstring hash = GetSelectedCommitHash();
     if (hash.empty()) {
+        return;
+    }
+
+    if (commandId == IDM_COMMIT_EDIT_MESSAGE) {
+        if (!CanEditSelectedCommitMessage()) {
+            MessageBoxW(hwnd_, L"Only the latest local unpushed commit can be edited.",
+                        LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+            return;
+        }
+
+        const std::wstring path = GetSelectedProjectPath();
+        const GitCommandResult currentMessageResult = GitRunner::RunGitCommand(path, {L"log", L"-1", L"--format=%B", L"HEAD"});
+        const std::wstring currentMessage = currentMessageResult.success ? Trim(currentMessageResult.output) : L"";
+        const std::wstring newMessage = PromptForText(
+            IDS_MSG_COMMIT_TITLE, IDS_MSG_COMMIT_PROMPT, currentMessage, true);
+        if (Trim(newMessage).empty()) {
+            MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMIT_EMPTY).c_str(),
+                        LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+            return;
+        }
+
+        wchar_t tempPath[MAX_PATH] = {};
+        wchar_t tempFile[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tempPath);
+        GetTempFileNameW(tempPath, L"gcm", 0, tempFile);
+
+        const std::string utf8 = WideToUtf8(newMessage);
+        {
+            std::ofstream output(tempFile, std::ios::binary | std::ios::trunc);
+            output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+        }
+
+        const GitCommandResult result = GitRunner::RunGitCommand(path, {L"commit", L"--amend", L"-F", tempFile});
+        DeleteFileW(tempFile);
+        AppendCommandResult(result);
+        RefreshCommitList();
         return;
     }
 
