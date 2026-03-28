@@ -106,6 +106,7 @@ private:
     HWND stopButton_ = nullptr;
     HFONT uiFont_ = nullptr;
     HFONT projectListFont_ = nullptr;
+    HFONT commitListFont_ = nullptr;
     HFONT logFont_ = nullptr;
     HFONT menuFont_ = nullptr;
     WNDPROC defaultLogEditProc_ = nullptr;

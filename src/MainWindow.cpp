@@ -1866,6 +1866,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             DeleteObject(projectListFont_);
             projectListFont_ = nullptr;
         }
+        if (commitListFont_ != nullptr) {
+            DeleteObject(commitListFont_);
+            commitListFont_ = nullptr;
+        }
         if (logFont_ != nullptr) {
             DeleteObject(logFont_);
             logFont_ = nullptr;
@@ -1886,15 +1890,15 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 void MainWindow::CreateControls() {
     addFolderButton_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
                                        0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_ADD_FOLDER), instance_, nullptr);
-    projectList_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+    projectList_ = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                    WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
-                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_LIST_PROJECTS), instance_, nullptr);
-    commitList_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_LIST_PROJECTS), instance_, nullptr);
+    commitList_ = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                   WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
-                                  0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_LIST_COMMITS), instance_, nullptr);
-    logEdit_ = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
-                               WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-                               0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_EDIT_LOG), instance_, nullptr);
+                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_LIST_COMMITS), instance_, nullptr);
+    logEdit_ = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
+                                WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+                                0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_EDIT_LOG), instance_, nullptr);
     logScrollBar_ = CreateWindowExW(0, kDarkScrollBarClass, L"",
                                     WS_CHILD,
                                     0, 0, 0, 0, hwnd_, nullptr, instance_, nullptr);
@@ -1938,8 +1942,8 @@ void MainWindow::CreateControls() {
     SetListViewColumn(commitList_, 1, 582, LoadStringResource(IDS_COL_MESSAGE));
     SetListViewColumn(commitList_, 2, 120, LoadStringResource(IDS_COL_DATE));
 
-    AddListViewRowsPadding(projectList_, 8);
-    AddListViewRowsPadding(commitList_, 10);
+    AddListViewRowsPadding(projectList_, 11);
+    AddListViewRowsPadding(commitList_, 16);
 
     defaultLogEditProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
         logEdit_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(MainWindow::LogEditProc)));
@@ -2053,8 +2057,11 @@ void MainWindow::ApplyFonts() {
                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     projectListFont_ = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    commitListFont_ = CreateFontW(-21, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     logFont_ = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
@@ -2069,6 +2076,7 @@ void MainWindow::ApplyFonts() {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     }
     SendMessageW(projectList_, WM_SETFONT, reinterpret_cast<WPARAM>(projectListFont_), TRUE);
+    SendMessageW(commitList_, WM_SETFONT, reinterpret_cast<WPARAM>(commitListFont_), TRUE);
     SendMessageW(logEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(logFont_), TRUE);
 
     SendMessageW(ListView_GetHeader(projectList_), WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
