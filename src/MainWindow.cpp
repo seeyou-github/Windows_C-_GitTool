@@ -486,6 +486,28 @@ void UpdateSquashComposeOkState(SquashComposeWindowState* state) {
     EnableWindow(state->okButton, (!invalidSelection && selectedCount >= 2) ? TRUE : FALSE);
 }
 
+void UpdateSquashComposeMessageFromSelection(SquashComposeWindowState* state) {
+    if (state == nullptr || state->messageEdit == nullptr) {
+        return;
+    }
+
+    std::wstring text;
+    bool first = true;
+    for (size_t i = 0; i < state->commits.size() && i < state->checked.size(); ++i) {
+        if (!state->checked[i]) {
+            continue;
+        }
+        if (!first) {
+            text += L"\r\n";
+        }
+        text += state->commits[i].message;
+        first = false;
+    }
+
+    state->message = text;
+    SetWindowTextW(state->messageEdit, text.c_str());
+}
+
 std::wstring BuildSquashCommitLabel(const CommitInfo& commit) {
     std::wstring label = commit.hash;
     label += L"  ";
@@ -1386,6 +1408,7 @@ LRESULT CALLBACK SquashComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         UpdateSquashComposeOkState(state);
+        UpdateSquashComposeMessageFromSelection(state);
         SetFocus(state->messageEdit);
         return 0;
     }
@@ -1424,6 +1447,7 @@ LRESULT CALLBACK SquashComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
                     state->checked[i] = ListView_GetCheckState(state->commitList, i) != FALSE;
                 }
                 UpdateSquashComposeOkState(state);
+                UpdateSquashComposeMessageFromSelection(state);
                 return 0;
             }
             if (header->code == NM_CUSTOMDRAW) {
@@ -1457,6 +1481,7 @@ LRESULT CALLBACK SquashComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
                 }
             }
             UpdateSquashComposeOkState(state);
+            UpdateSquashComposeMessageFromSelection(state);
             return 0;
         }
         if (LOWORD(wParam) == IDOK && state != nullptr) {
