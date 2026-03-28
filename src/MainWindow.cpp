@@ -3148,10 +3148,19 @@ void MainWindow::LoadProjectsIntoList() {
         ListView_InsertItem(projectList_, &item);
     }
 
-    if (!projectStore_.GetLastProject().empty()) {
-        SelectProjectByPath(projectStore_.GetLastProject());
-    } else if (ListView_GetItemCount(projectList_) > 0) {
+    const int projectCount = ListView_GetItemCount(projectList_);
+    if (projectCount == 1) {
         ListView_SetItemState(projectList_, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(projectList_, 0, FALSE);
+    } else if (!projectStore_.GetLastProject().empty()) {
+        SelectProjectByPath(projectStore_.GetLastProject());
+        if (ListView_GetNextItem(projectList_, -1, LVNI_SELECTED) < 0 && projectCount > 0) {
+            ListView_SetItemState(projectList_, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(projectList_, 0, FALSE);
+        }
+    } else if (projectCount > 0) {
+        ListView_SetItemState(projectList_, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(projectList_, 0, FALSE);
     }
     suppressProjectSelectionRefresh_ = false;
 }
