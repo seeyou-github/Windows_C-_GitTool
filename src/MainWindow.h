@@ -5,6 +5,7 @@
 
 #include <richedit.h>
 #include <windows.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -17,11 +18,13 @@ private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LogEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LogScrollBarProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    static DWORD WINAPI AsyncGitCommandThread(LPVOID param);
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void CreateControls();
     void ShowControls();
     void LayoutControls(int width, int height);
+    void SetCommandUiState(bool running, const std::wstring& statusText = L"");
     void UpdateProjectListColumnWidth(int listWidth);
     void UpdateLogScrollBar();
     void ScrollLogToPosition(int position);
@@ -45,7 +48,17 @@ private:
     void ShowCommitDetails();
     void OpenSelectedInExplorer();
     void OpenSelectedInTerminal();
-    void RunSimpleCommand(const std::vector<std::wstring>& args);
+    void RunSimpleCommand(
+        const std::vector<std::wstring>& args,
+        bool refreshStatusAfter = true,
+        bool refreshCommitsAfter = true,
+        const std::wstring& cleanupFilePath = L"");
+    void StartAsyncGitCommand(
+        const std::wstring& repoPath,
+        const std::vector<std::wstring>& args,
+        bool refreshStatusAfter,
+        bool refreshCommitsAfter,
+        const std::wstring& cleanupFilePath);
     void RunGitInit(const std::wstring& repoPath = L"");
     void RunCommit();
     void ShowBranchMenu();
@@ -85,6 +98,8 @@ private:
     HWND buttonFetch_ = nullptr;
     HWND buttonBranch_ = nullptr;
     HWND buttonRemote_ = nullptr;
+    HWND statusLabel_ = nullptr;
+    HWND stopButton_ = nullptr;
     HFONT uiFont_ = nullptr;
     HFONT projectListFont_ = nullptr;
     HFONT logFont_ = nullptr;
@@ -98,5 +113,7 @@ private:
     bool logScrollDragging_ = false;
     int logScrollDragOffsetY_ = 0;
     bool initialShowPrepared_ = false;
+    bool suppressProjectSelectionRefresh_ = false;
+    HANDLE currentCancelEvent_ = nullptr;
     std::wstring currentProjectPath_;
 };

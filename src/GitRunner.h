@@ -1,11 +1,14 @@
 #pragma once
 
+#include <windows.h>
+
 #include <string>
 #include <vector>
 
 struct GitCommandResult {
     int exitCode = -1;
     bool success = false;
+    bool cancelled = false;
     std::wstring commandLine;
     std::wstring output;
 };
@@ -32,7 +35,8 @@ public:
 
     static GitCommandResult RunGitCommand(
         const std::wstring& repoPath,
-        const std::vector<std::wstring>& args);
+        const std::vector<std::wstring>& args,
+        HANDLE cancelEvent = nullptr);
 
     static std::vector<CommitInfo> GetRecentCommits(
         const std::wstring& repoPath,

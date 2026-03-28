@@ -20,6 +20,7 @@ constexpr wchar_t kMainWindowClass[] = L"GitVisualToolMainWindow";
 constexpr wchar_t kDarkScrollBarClass[] = L"GitVisualToolDarkScrollBar";
 constexpr wchar_t kCommitDetailWindowClass[] = L"GitVisualToolCommitDetailWindow";
 constexpr wchar_t kDiffContentWindowClass[] = L"GitVisualToolDiffContentWindow";
+constexpr UINT WM_APP_GIT_COMMAND_DONE = WM_APP + 1;
 constexpr int kToolbarHeight = 44;
 constexpr int kPadding = 12;
 constexpr int kLeftPanelWidth = 380;
@@ -27,6 +28,7 @@ constexpr int kLogHeight = 220;
 constexpr int kMinWindowWidth = 1231;
 constexpr int kMinWindowHeight = 820;
 constexpr int kLogScrollBarWidth = 14;
+constexpr int kStatusBarHeight = 32;
 HFONT g_menuFont = nullptr;
 constexpr COLORREF kMenuBackground = RGB(242, 242, 242);
 constexpr COLORREF kMenuHoverBackground = RGB(228, 228, 228);
@@ -100,7 +102,8 @@ bool IsOwnerDrawButtonId(UINT id) {
            id == IDC_BTN_PULL ||
            id == IDC_BTN_FETCH ||
            id == IDC_BTN_BRANCH ||
-           id == IDC_BTN_REMOTE;
+           id == IDC_BTN_REMOTE ||
+           id == IDC_BTN_STOP;
 }
 
 void DrawOwnerDrawButton(const DRAWITEMSTRUCT* dis) {
@@ -253,6 +256,17 @@ struct PromptDialogState {
     bool multiline = false;
     bool accepted = false;
     WNDPROC editProc = nullptr;
+};
+
+struct AsyncGitCommandState {
+    HWND hwnd = nullptr;
+    std::wstring repoPath;
+    std::vector<std::wstring> args;
+    bool refreshStatusAfter = true;
+    bool refreshCommitsAfter = true;
+    std::wstring cleanupFilePath;
+    HANDLE cancelEvent = nullptr;
+    GitCommandResult result;
 };
 
 struct DiffContentWindowState {
@@ -1258,6 +1272,20 @@ LRESULT CALLBACK MainWindow::LogScrollBarProc(HWND hwnd, UINT message, WPARAM wP
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
+    auto* state = reinterpret_cast<AsyncGitCommandState*>(param);
+    if (state == nullptr) {
+        return 0;
+    }
+
+    state->result = GitRunner::RunGitCommand(state->repoPath, state->args, state->cancelEvent);
+    if (!state->cleanupFilePath.empty()) {
+        DeleteFileW(state->cleanupFilePath.c_str());
+    }
+    PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state));
+    return 0;
+}
+
 LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE:
@@ -1269,14 +1297,44 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             GetClientRect(hwnd_, &rect);
             LayoutControls(rect.right - rect.left, rect.bottom - rect.top);
         }
+        ClearLog();
         LoadProjectsIntoList();
-        AppendLog(LoadStringResource(IDS_LOG_READY));
         RefreshCurrentRepository(false);
         ShowControls();
         return 0;
     case WM_SIZE:
         LayoutControls(LOWORD(lParam), HIWORD(lParam));
         return 0;
+    case WM_APP_GIT_COMMAND_DONE: {
+        auto* state = reinterpret_cast<AsyncGitCommandState*>(lParam);
+        if (state != nullptr) {
+            commandRunning_ = false;
+            HANDLE completedCancelEvent = state->cancelEvent;
+            if (currentCancelEvent_ != nullptr) {
+                CloseHandle(currentCancelEvent_);
+                currentCancelEvent_ = nullptr;
+            }
+            SetCommandUiState(false, state->result.cancelled ? L"Cancelled" : L"Ready");
+            AppendCommandResult(state->result);
+
+            const std::wstring selectedPath = GetSelectedProjectPath();
+            if (selectedPath == state->repoPath) {
+                if (state->refreshStatusAfter) {
+                    RefreshCurrentRepository(true);
+                } else if (state->refreshCommitsAfter) {
+                    RefreshCommitList();
+                }
+            } else if (state->refreshCommitsAfter) {
+                RefreshCommitList();
+            }
+
+            if (completedCancelEvent != nullptr && completedCancelEvent != currentCancelEvent_) {
+                state->cancelEvent = nullptr;
+            }
+            delete state;
+        }
+        return 0;
+    }
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
         info->ptMinTrackSize.x = kMinWindowWidth;
@@ -1321,29 +1379,34 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             AddFolder();
             return 0;
         case IDC_BTN_STATUS:
-            RunSimpleCommand({L"status", L"--short", L"--branch"});
+            RunSimpleCommand({L"status", L"--short", L"--branch"}, false, false);
             return 0;
         case IDC_BTN_ADD_ALL:
-            RunSimpleCommand({L"add", L"-A"});
-            RefreshCurrentRepository(false);
+            RunSimpleCommand({L"add", L"-A"}, false, true);
             return 0;
         case IDC_BTN_COMMIT:
             RunCommit();
             return 0;
         case IDC_BTN_PUSH:
-            RunSimpleCommand({L"push"});
+            RunSimpleCommand({L"push"}, false, true);
             return 0;
         case IDC_BTN_PULL:
-            RunSimpleCommand({L"pull"});
+            RunSimpleCommand({L"pull"}, false, true);
             return 0;
         case IDC_BTN_FETCH:
-            RunSimpleCommand({L"fetch", L"--all"});
+            RunSimpleCommand({L"fetch", L"--all"}, false, true);
             return 0;
         case IDC_BTN_BRANCH:
             ShowBranchMenu();
             return 0;
         case IDC_BTN_REMOTE:
             ShowRemoteMenu();
+            return 0;
+        case IDC_BTN_STOP:
+            if (commandRunning_ && currentCancelEvent_ != nullptr) {
+                SetEvent(currentCancelEvent_);
+                SetCommandUiState(true, L"Stopping...");
+            }
             return 0;
         case IDM_PROJECT_REMOVE:
             RemoveSelectedProject();
@@ -1361,7 +1424,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             RunGitInit(GetSelectedProjectPath());
             return 0;
         case IDM_REMOTE_SHOW:
-            RunSimpleCommand({L"remote", L"-v"});
+            RunSimpleCommand({L"remote", L"-v"}, false, false);
             return 0;
         case IDM_REMOTE_SET_ORIGIN:
             HandleRemoteMenuCommand(LOWORD(wParam));
@@ -1400,8 +1463,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         if (header->idFrom == IDC_LIST_PROJECTS && header->code == LVN_ITEMCHANGED) {
             auto* info = reinterpret_cast<NMLISTVIEW*>(lParam);
-            if ((info->uNewState & LVIS_SELECTED) != 0) {
-                RefreshCurrentRepository(true);
+            if (!suppressProjectSelectionRefresh_ && (info->uNewState & LVIS_SELECTED) != 0) {
+                RefreshCurrentRepository(false);
             }
             return 0;
         }
@@ -1473,6 +1536,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY:
         PersistWindowSize();
         projectStore_.Save();
+        if (currentCancelEvent_ != nullptr) {
+            CloseHandle(currentCancelEvent_);
+            currentCancelEvent_ = nullptr;
+        }
         if (commitContextMenu_ != nullptr) {
             DestroyMenu(commitContextMenu_);
             commitContextMenu_ = nullptr;
@@ -1535,6 +1602,10 @@ void MainWindow::CreateControls() {
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_BRANCH), instance_, nullptr);
     buttonRemote_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_REMOTE), instance_, nullptr);
+    statusLabel_ = CreateWindowExW(0, L"STATIC", L"Ready", WS_CHILD,
+                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_STATIC_STATUS), instance_, nullptr);
+    stopButton_ = CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | BS_OWNERDRAW,
+                                  0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_STOP), instance_, nullptr);
 
     ListView_SetExtendedListViewStyle(projectList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     ListView_SetExtendedListViewStyle(commitList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -1572,6 +1643,9 @@ void MainWindow::CreateControls() {
     SetButtonText(IDC_BTN_FETCH, IDS_BTN_FETCH);
     SetButtonText(IDC_BTN_BRANCH, IDS_BTN_BRANCH);
     SetButtonText(IDC_BTN_REMOTE, IDS_BTN_REMOTE);
+    SetWindowTextW(statusLabel_, L"Ready");
+    SetWindowTextW(stopButton_, L"Stop");
+    EnableWindow(stopButton_, FALSE);
     UpdateWindowTitle();
 }
 
@@ -1579,7 +1653,8 @@ void MainWindow::ShowControls() {
     HWND controls[] = {
         addFolderButton_, projectList_, commitList_, logEdit_, logScrollBar_,
         buttonStatus_, buttonAddAll_, buttonCommit_, buttonPush_,
-        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_
+        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_,
+        statusLabel_, stopButton_
     };
     for (HWND control : controls) {
         ShowWindow(control, SW_SHOW);
@@ -1587,11 +1662,31 @@ void MainWindow::ShowControls() {
     ShowScrollBar(logEdit_, SB_VERT, FALSE);
 }
 
+void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText) {
+    const std::wstring text = statusText.empty() ? (running ? L"Running..." : L"Ready") : statusText;
+    if (statusLabel_ != nullptr) {
+        SetWindowTextW(statusLabel_, text.c_str());
+    }
+
+    HWND buttons[] = {
+        buttonStatus_, buttonAddAll_, buttonCommit_, buttonPush_,
+        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_
+    };
+    for (HWND button : buttons) {
+        if (button != nullptr) {
+            EnableWindow(button, running ? FALSE : TRUE);
+        }
+    }
+    if (stopButton_ != nullptr) {
+        EnableWindow(stopButton_, running ? TRUE : FALSE);
+    }
+}
+
 void MainWindow::LayoutControls(int width, int height) {
     const int rightX = kLeftPanelWidth + kPadding * 2;
     const int rightWidth = width - rightX - kPadding;
     const int contentTop = kToolbarHeight + kPadding;
-    const int contentBottom = height - kPadding;
+    const int contentBottom = height - kPadding - kStatusBarHeight - kPadding;
     const int totalContentHeight = contentBottom - contentTop;
     const int splitGap = kPadding;
     const int paneHeight = (totalContentHeight - splitGap) / 2;
@@ -1612,6 +1707,10 @@ void MainWindow::LayoutControls(int width, int height) {
     const int logTop = contentTop + paneHeight + splitGap;
     MoveWindow(logEdit_, rightX, logTop, rightWidth - kLogScrollBarWidth, paneHeight, TRUE);
     MoveWindow(logScrollBar_, rightX + rightWidth - kLogScrollBarWidth, logTop, kLogScrollBarWidth, paneHeight, TRUE);
+    const int statusTop = contentBottom + kPadding;
+    const int stopWidth = 92;
+    MoveWindow(statusLabel_, rightX, statusTop, rightWidth - stopWidth - 12, kStatusBarHeight, TRUE);
+    MoveWindow(stopButton_, rightX + rightWidth - stopWidth, statusTop, stopWidth, kStatusBarHeight, TRUE);
     UpdateLogScrollBar();
 }
 
@@ -1651,7 +1750,7 @@ void MainWindow::ApplyFonts() {
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     g_menuFont = menuFont_;
-    HWND controls[] = {addFolderButton_, commitList_, logEdit_,
+    HWND controls[] = {addFolderButton_, commitList_, logEdit_, statusLabel_, stopButton_,
                        buttonStatus_, buttonAddAll_, buttonCommit_, buttonPush_,
                        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_};
     for (HWND control : controls) {
@@ -1665,6 +1764,7 @@ void MainWindow::ApplyFonts() {
 }
 
 void MainWindow::LoadProjectsIntoList() {
+    suppressProjectSelectionRefresh_ = true;
     FreeProjectListItemData(projectList_);
     ListView_DeleteAllItems(projectList_);
     int index = 0;
@@ -1683,6 +1783,7 @@ void MainWindow::LoadProjectsIntoList() {
     } else if (ListView_GetItemCount(projectList_) > 0) {
         ListView_SetItemState(projectList_, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     }
+    suppressProjectSelectionRefresh_ = false;
 }
 
 void MainWindow::RefreshCurrentRepository(bool runStatusCommand) {
@@ -1834,7 +1935,11 @@ void MainWindow::AppendCommandResult(const GitCommandResult& result) {
         }
         flushBuffer();
     }
-    AppendLog(result.success ? L"Command completed." : L"Command failed.");
+    if (result.cancelled) {
+        AppendLog(L"Command cancelled.");
+    } else {
+        AppendLog(result.success ? L"Command completed." : L"Command failed.");
+    }
 }
 
 void MainWindow::SelectProjectByPath(const std::wstring& path) {
@@ -1918,7 +2023,7 @@ void MainWindow::AddFolder() {
 
     LoadProjectsIntoList();
     SelectProjectByPath(repoPath);
-    RefreshCurrentRepository(true);
+    RefreshCurrentRepository(false);
 }
 
 void MainWindow::RemoveSelectedProject() {
@@ -2020,7 +2125,46 @@ void MainWindow::OpenSelectedInTerminal() {
     }
 }
 
-void MainWindow::RunSimpleCommand(const std::vector<std::wstring>& args) {
+void MainWindow::StartAsyncGitCommand(
+    const std::wstring& repoPath,
+    const std::vector<std::wstring>& args,
+    bool refreshStatusAfter,
+    bool refreshCommitsAfter,
+    const std::wstring& cleanupFilePath) {
+    auto* state = new AsyncGitCommandState();
+    state->hwnd = hwnd_;
+    state->repoPath = repoPath;
+    state->args = args;
+    state->refreshStatusAfter = refreshStatusAfter;
+    state->refreshCommitsAfter = refreshCommitsAfter;
+    state->cleanupFilePath = cleanupFilePath;
+    state->cancelEvent = currentCancelEvent_;
+
+    const HANDLE thread = CreateThread(
+        nullptr, 0, MainWindow::AsyncGitCommandThread, state, 0, nullptr);
+    if (thread == nullptr) {
+        if (!cleanupFilePath.empty()) {
+            DeleteFileW(cleanupFilePath.c_str());
+        }
+        delete state;
+        commandRunning_ = false;
+        if (currentCancelEvent_ != nullptr) {
+            CloseHandle(currentCancelEvent_);
+            currentCancelEvent_ = nullptr;
+        }
+        SetCommandUiState(false, L"Ready");
+        MessageBoxW(hwnd_, L"Failed to start background git task.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONERROR);
+        return;
+    }
+    CloseHandle(thread);
+}
+
+void MainWindow::RunSimpleCommand(
+    const std::vector<std::wstring>& args,
+    bool refreshStatusAfter,
+    bool refreshCommitsAfter,
+    const std::wstring& cleanupFilePath) {
     const std::wstring path = GetSelectedProjectPath();
     if (path.empty()) {
         MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_SELECT_REPO).c_str(),
@@ -2034,10 +2178,16 @@ void MainWindow::RunSimpleCommand(const std::vector<std::wstring>& args) {
     }
 
     commandRunning_ = true;
-    const GitCommandResult result = GitRunner::RunGitCommand(path, args);
-    commandRunning_ = false;
-    AppendCommandResult(result);
-    RefreshCommitList();
+    currentCancelEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (currentCancelEvent_ == nullptr) {
+        commandRunning_ = false;
+        MessageBoxW(hwnd_, L"Failed to create cancel event.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONERROR);
+        return;
+    }
+    SetCommandUiState(true, L"Running...");
+    AppendLog(L"Running git command in background...");
+    StartAsyncGitCommand(path, args, refreshStatusAfter, refreshCommitsAfter, cleanupFilePath);
 }
 
 void MainWindow::RunGitInit(const std::wstring& requestedPath) {
@@ -2103,7 +2253,7 @@ void MainWindow::RunGitInit(const std::wstring& requestedPath) {
         LoadProjectsIntoList();
     }
     SelectProjectByPath(repoPath);
-    RefreshCurrentRepository(true);
+    RefreshCurrentRepository(false);
     MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_INIT_SUCCESS).c_str(),
                 LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
 }
@@ -2132,8 +2282,7 @@ void MainWindow::RunCommit() {
         output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
     }
 
-    RunSimpleCommand({L"commit", L"-F", tempFile});
-    DeleteFileW(tempFile);
+    RunSimpleCommand({L"commit", L"-F", tempFile}, false, true, tempFile);
 }
 
 void MainWindow::ShowBranchMenu() {
@@ -2177,13 +2326,13 @@ void MainWindow::HandleBranchMenuCommand(UINT commandId) {
                         LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
             return;
         }
-        RunSimpleCommand({L"checkout", L"-b", branchName});
+        RunSimpleCommand({L"checkout", L"-b", branchName}, false, true);
         return;
     }
 
     const size_t index = commandId - IDM_BRANCH_BASE;
     if (index < cachedBranches_.size()) {
-        RunSimpleCommand({L"checkout", cachedBranches_[index]});
+        RunSimpleCommand({L"checkout", cachedBranches_[index]}, false, true);
     }
 }
 
@@ -2286,10 +2435,7 @@ void MainWindow::HandleCommitMenuCommand(UINT commandId) {
             output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
         }
 
-        const GitCommandResult result = GitRunner::RunGitCommand(path, {L"commit", L"--amend", L"-F", tempFile});
-        DeleteFileW(tempFile);
-        AppendCommandResult(result);
-        RefreshCommitList();
+        RunSimpleCommand({L"commit", L"--amend", L"-F", tempFile}, false, true, tempFile);
         return;
     }
 
@@ -2302,12 +2448,12 @@ void MainWindow::HandleCommitMenuCommand(UINT commandId) {
         if (result != IDYES) {
             return;
         }
-        RunSimpleCommand({L"reset", L"--hard", hash});
+        RunSimpleCommand({L"reset", L"--hard", hash}, false, true);
         return;
     }
 
     if (commandId == IDM_COMMIT_RESET_SOFT) {
-        RunSimpleCommand({L"reset", L"--soft", hash});
+        RunSimpleCommand({L"reset", L"--soft", hash}, false, true);
     }
 }
 

@@ -84,7 +84,10 @@ bool GitRunner::IsGitRepository(const std::wstring& repoPath) {
     return result.success && result.output.find(L"true") != std::wstring::npos;
 }
 
-GitCommandResult GitRunner::RunGitCommand(const std::wstring& repoPath, const std::vector<std::wstring>& args) {
+GitCommandResult GitRunner::RunGitCommand(
+    const std::wstring& repoPath,
+    const std::vector<std::wstring>& args,
+    HANDLE cancelEvent) {
     GitCommandResult result;
     result.commandLine = L"git " + JoinArguments(args);
 
@@ -136,18 +139,44 @@ GitCommandResult GitRunner::RunGitCommand(const std::wstring& repoPath, const st
 
     std::string outputBuffer;
     char temp[4096];
+    bool processFinished = false;
+    while (!processFinished) {
+        DWORD available = 0;
+        if (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
+            const DWORD toRead = std::min<DWORD>(available, static_cast<DWORD>(sizeof(temp)));
+            DWORD bytesRead = 0;
+            if (ReadFile(readPipe, temp, toRead, &bytesRead, nullptr) && bytesRead > 0) {
+                outputBuffer.append(temp, temp + bytesRead);
+            }
+            continue;
+        }
+
+        if (cancelEvent != nullptr && WaitForSingleObject(cancelEvent, 0) == WAIT_OBJECT_0) {
+            TerminateProcess(pi.hProcess, 1);
+            result.cancelled = true;
+            break;
+        }
+
+        const DWORD waitResult = WaitForSingleObject(pi.hProcess, 50);
+        processFinished = (waitResult == WAIT_OBJECT_0);
+    }
+
     DWORD bytesRead = 0;
     while (ReadFile(readPipe, temp, sizeof(temp), &bytesRead, nullptr) && bytesRead > 0) {
         outputBuffer.append(temp, temp + bytesRead);
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
-
     DWORD exitCode = 1;
     GetExitCodeProcess(pi.hProcess, &exitCode);
     result.exitCode = static_cast<int>(exitCode);
-    result.success = (exitCode == 0);
+    result.success = !result.cancelled && (exitCode == 0);
     result.output = Utf8ToWide(outputBuffer);
+    if (result.cancelled) {
+        if (!result.output.empty() && result.output.back() != L'\n') {
+            result.output += L"\r\n";
+        }
+        result.output += L"Command cancelled by user.\r\n";
+    }
 
     CloseHandle(readPipe);
     CloseHandle(pi.hProcess);
