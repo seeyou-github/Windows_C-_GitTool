@@ -12,9 +12,9 @@
 #include <windowsx.h>
 
 #include <algorithm>
-#include <memory>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 namespace {
@@ -31,7 +31,7 @@ constexpr UINT WM_APP_GIT_COMMAND_DONE = WM_APP + 1;
 constexpr UINT WM_APP_COMMITS_REFRESH_DONE = WM_APP + 2;
 constexpr UINT WM_APP_GIT_COMMAND_OUTPUT = WM_APP + 3;
 constexpr UINT_PTR kLogFlushTimerId = 1;
-constexpr int kToolbarHeight = 44;
+constexpr int kToolbarHeight = 58;
 constexpr int kPadding = 12;
 constexpr int kLeftPanelWidth = 380;
 constexpr int kLogHeight = 220;
@@ -47,6 +47,57 @@ constexpr COLORREF kMenuHoverBackground = RGB(228, 228, 228);
 constexpr COLORREF kMenuText = RGB(40, 40, 40);
 constexpr COLORREF kLogDefaultText = RGB(170, 176, 184);
 std::unique_ptr<Gdiplus::Bitmap> g_githubBitmap;
+HICON g_githubIcon = nullptr;
+
+darkui::Theme BuildDarkUiTheme(int fontHeight = -18, bool monospace = false) {
+    darkui::Theme theme;
+    theme.background = DarkTheme::WindowBackground();
+    theme.panel = DarkTheme::PanelBackground();
+    theme.button = DarkTheme::ControlBackground();
+    theme.buttonHover = DarkTheme::AccentBackground();
+    theme.buttonHot = DarkTheme::AccentBackground();
+    theme.buttonDisabled = RGB(52, 56, 64);
+    theme.buttonDisabledText = RGB(124, 130, 140);
+    theme.border = DarkTheme::BorderColor();
+    theme.text = DarkTheme::TextColor();
+    theme.mutedText = RGB(156, 164, 174);
+    theme.arrow = RGB(156, 164, 174);
+    theme.popupItem = DarkTheme::ControlBackground();
+    theme.popupItemHot = DarkTheme::AccentBackground();
+    theme.popupAccentItem = DarkTheme::AccentBackground();
+    theme.popupAccentItemHot = RGB(82, 90, 104);
+    theme.editBackground = DarkTheme::ControlBackground();
+    theme.editText = DarkTheme::TextColor();
+    theme.editPlaceholder = RGB(142, 149, 160);
+    theme.tableBackground = DarkTheme::ControlBackground();
+    theme.tableText = DarkTheme::TextColor();
+    theme.tableHeaderBackground = DarkTheme::PanelBackground();
+    theme.tableHeaderText = DarkTheme::TextColor();
+    theme.tableGrid = DarkTheme::BorderColor();
+    theme.progressBackground = DarkTheme::WindowBackground();
+    theme.progressTrack = DarkTheme::ControlBackground();
+    theme.progressFill = RGB(76, 175, 80);
+    theme.progressText = DarkTheme::TextColor();
+    theme.scrollBarBackground = DarkTheme::WindowBackground();
+    theme.scrollBarTrack = RGB(33, 36, 42);
+    theme.scrollBarThumb = RGB(82, 90, 102);
+    theme.scrollBarThumbHot = RGB(100, 108, 122);
+    theme.uiFont.height = fontHeight;
+    theme.uiFont.family = monospace ? L"Consolas" : L"Segoe UI";
+    theme.uiFont.monospace = monospace;
+    theme.scrollBarThickness = kLogScrollBarWidth;
+    return theme;
+}
+
+darkui::Theme BuildToolbarTheme() {
+    darkui::Theme theme = BuildDarkUiTheme(-22);
+    theme.toolbarHeight = 54;
+    theme.textPadding = 6;
+    theme.toolbarItem = RGB(46, 50, 58);
+    theme.toolbarItemHot = RGB(58, 64, 74);
+    theme.toolbarItemActive = RGB(72, 80, 92);
+    return theme;
+}
 
 bool TryParseGitProgressLine(const std::wstring& rawLine, int* percent, std::wstring* label) {
     std::wstring line = rawLine;
@@ -270,6 +321,15 @@ Gdiplus::Bitmap* GetGitHubBitmap() {
         }
     }
     return g_githubBitmap.get();
+}
+
+HICON GetGitHubIcon() {
+    if (g_githubIcon == nullptr) {
+        if (auto* bitmap = GetGitHubBitmap(); bitmap != nullptr) {
+            bitmap->GetHICON(&g_githubIcon);
+        }
+    }
+    return g_githubIcon;
 }
 
 COLORREF MapAnsiColor(int code, COLORREF fallback) {
@@ -566,6 +626,9 @@ struct CommitComposeWindowState {
     HWND messageEdit = nullptr;
     HWND okButton = nullptr;
     HWND cancelButton = nullptr;
+    darkui::Button selectAllButtonControl;
+    darkui::Button okButtonControl;
+    darkui::Button cancelButtonControl;
     HWND hintLabel = nullptr;
     HWND messageLabel = nullptr;
     HFONT uiFont = nullptr;
@@ -589,6 +652,9 @@ struct SquashComposeWindowState {
     HWND messageEdit = nullptr;
     HWND okButton = nullptr;
     HWND cancelButton = nullptr;
+    darkui::Button selectAllButtonControl;
+    darkui::Button okButtonControl;
+    darkui::Button cancelButtonControl;
     HWND hintLabel = nullptr;
     HWND messageLabel = nullptr;
     HFONT uiFont = nullptr;
@@ -601,6 +667,11 @@ struct CloneWindowState {
     std::wstring title = L"clone";
     std::wstring repoUrl;
     std::wstring targetDirectory;
+    darkui::Edit urlEditControl;
+    darkui::Edit pathEditControl;
+    darkui::Button browseButtonControl;
+    darkui::Button okButtonControl;
+    darkui::Button cancelButtonControl;
     HWND urlLabel = nullptr;
     HWND urlEdit = nullptr;
     HWND pathLabel = nullptr;
@@ -616,6 +687,8 @@ struct DeleteBranchWindowState {
     HWND parent = nullptr;
     std::wstring selectedBranch;
     std::vector<std::wstring> branches;
+    darkui::Button deleteButtonControl;
+    darkui::Button cancelButtonControl;
     HWND hintLabel = nullptr;
     HWND branchList = nullptr;
     HWND deleteButton = nullptr;
@@ -1299,10 +1372,8 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         state->hintLabel = CreateWindowExW(
             0, L"STATIC", L"Select files to stage, then double-click a diff file to compare.",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
-        state->selectAllButton = CreateWindowExW(
-            0, L"BUTTON", L"\u5168\u9009",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4303), cs->hInstance, nullptr);
+        state->selectAllButtonControl.Create(hwnd, 4303, L"\u5168\u9009", BuildDarkUiTheme());
+        state->selectAllButton = state->selectAllButtonControl.hwnd();
         state->messageLabel = CreateWindowExW(
             0, L"STATIC", L"Commit Message",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
@@ -1315,21 +1386,14 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
                 WS_VSCROLL | WS_TABSTOP,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4302), cs->hInstance, nullptr);
-        state->okButton = CreateWindowExW(
-            0, L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
-        state->cancelButton = CreateWindowExW(
-            0, L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+        state->okButtonControl.Create(hwnd, IDOK, L"OK", BuildDarkUiTheme());
+        state->okButton = state->okButtonControl.hwnd();
+        state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
+        state->cancelButton = state->cancelButtonControl.hwnd();
 
         SendMessageW(state->hintLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
-        SendMessageW(state->selectAllButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->messageLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->fileList, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
-        SendMessageW(state->okButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
-        SendMessageW(state->cancelButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         ConfigureRichEditColors(
             state->messageEdit,
             state->uiFont,
@@ -1559,21 +1623,15 @@ LRESULT CALLBACK SquashComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->message.c_str(),
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4402), cs->hInstance, nullptr);
-        state->okButton = CreateWindowExW(
-            0, L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
-        state->cancelButton = CreateWindowExW(
-            0, L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+        state->okButtonControl.Create(hwnd, IDOK, L"OK", BuildDarkUiTheme());
+        state->okButton = state->okButtonControl.hwnd();
+        state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
+        state->cancelButton = state->cancelButtonControl.hwnd();
 
         SendMessageW(state->hintLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->selectAllButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->messageLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         SendMessageW(state->commitList, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
-        SendMessageW(state->okButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
-        SendMessageW(state->cancelButton, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         ConfigureRichEditColors(state->messageEdit, state->uiFont, DarkTheme::ControlBackground(), DarkTheme::TextColor());
         DarkTheme::ApplyDarkControlTheme(state->commitList);
         DarkTheme::ApplyDarkControlTheme(state->messageEdit);
@@ -1742,29 +1800,29 @@ LRESULT CALLBACK CloneWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
         state->urlLabel = CreateWindowExW(0, L"STATIC", L"Repository URL", WS_CHILD | WS_VISIBLE,
                                           0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
-        state->urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->repoUrl.c_str(),
-                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4501), cs->hInstance, nullptr);
+        state->urlEditControl.Create(
+            hwnd, 4501, state->repoUrl, BuildDarkUiTheme(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL);
+        state->urlEdit = state->urlEditControl.hwnd();
         state->pathLabel = CreateWindowExW(0, L"STATIC", L"Save To", WS_CHILD | WS_VISIBLE,
                                            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
-        state->pathEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->targetDirectory.c_str(),
-                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY,
-                                          0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4502), cs->hInstance, nullptr);
-        state->browseButton = CreateWindowExW(0, L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4503), cs->hInstance, nullptr);
-        state->okButton = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                          0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
-        state->cancelButton = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+        state->pathEditControl.Create(
+            hwnd, 4502, state->targetDirectory, BuildDarkUiTheme(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY);
+        state->pathEdit = state->pathEditControl.hwnd();
+        state->browseButtonControl.Create(hwnd, 4503, L"Browse", BuildDarkUiTheme());
+        state->browseButton = state->browseButtonControl.hwnd();
+        state->okButtonControl.Create(hwnd, IDOK, L"OK", BuildDarkUiTheme());
+        state->okButton = state->okButtonControl.hwnd();
+        state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
+        state->cancelButton = state->cancelButtonControl.hwnd();
 
         HWND controls[] = {state->urlLabel, state->urlEdit, state->pathLabel, state->pathEdit,
                            state->browseButton, state->okButton, state->cancelButton};
         for (HWND control : controls) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
         }
-        DarkTheme::ApplyDarkControlTheme(state->urlEdit);
-        DarkTheme::ApplyDarkControlTheme(state->pathEdit);
-        SetFocus(state->urlEdit);
+        SetFocus(state->urlEditControl.edit_hwnd());
         return 0;
     }
     case WM_SIZE:
@@ -1799,17 +1857,13 @@ LRESULT CALLBACK CloneWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
                 SHGetPathFromIDListW(itemId, pathBuffer);
                 CoTaskMemFree(itemId);
                 state->targetDirectory = pathBuffer;
-                SetWindowTextW(state->pathEdit, state->targetDirectory.c_str());
+                state->pathEditControl.SetText(state->targetDirectory);
             }
             return 0;
         }
         if (state != nullptr && LOWORD(wParam) == IDOK) {
-            wchar_t urlBuffer[2048] = {};
-            GetWindowTextW(state->urlEdit, urlBuffer, 2048);
-            state->repoUrl = urlBuffer;
-            wchar_t pathBuffer[MAX_PATH] = {};
-            GetWindowTextW(state->pathEdit, pathBuffer, MAX_PATH);
-            state->targetDirectory = pathBuffer;
+            state->repoUrl = state->urlEditControl.GetText();
+            state->targetDirectory = state->pathEditControl.GetText();
             state->accepted = true;
             DestroyWindow(hwnd);
             return 0;
@@ -1866,12 +1920,10 @@ LRESULT CALLBACK DeleteBranchWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
         state->branchList = CreateWindowExW(0, L"LISTBOX", L"",
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
                                             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4601), cs->hInstance, nullptr);
-        state->deleteButton = CreateWindowExW(0, L"BUTTON", L"Delete",
-                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
-        state->cancelButton = CreateWindowExW(0, L"BUTTON", L"Cancel",
-                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+        state->deleteButtonControl.Create(hwnd, IDOK, L"Delete", BuildDarkUiTheme());
+        state->deleteButton = state->deleteButtonControl.hwnd();
+        state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
+        state->cancelButton = state->cancelButtonControl.hwnd();
 
         HWND controls[] = {state->hintLabel, state->branchList, state->deleteButton, state->cancelButton};
         for (HWND control : controls) {
@@ -2688,6 +2740,24 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         info->ptMinTrackSize.y = kMinWindowHeight;
         return 0;
     }
+    case WM_VSCROLL:
+        if (reinterpret_cast<HWND>(lParam) == logScrollBar_) {
+            switch (LOWORD(wParam)) {
+            case SB_THUMBPOSITION:
+            case SB_THUMBTRACK:
+            case SB_LINEUP:
+            case SB_LINEDOWN:
+            case SB_PAGEUP:
+            case SB_PAGEDOWN:
+            case SB_TOP:
+            case SB_BOTTOM:
+                ScrollLogToPosition(HIWORD(wParam));
+                return 0;
+            default:
+                break;
+            }
+        }
+        break;
     case WM_DRAWITEM: {
         const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
         if (dis != nullptr && IsOwnerDrawButtonId(dis->CtlID)) {
@@ -2747,12 +2817,6 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_BTN_FETCH:
             RunSimpleCommand({L"fetch", L"--all"}, true);
-            return 0;
-        case IDC_BTN_BRANCH:
-            ShowBranchMenu();
-            return 0;
-        case IDC_BTN_REMOTE:
-            ShowRemoteMenu();
             return 0;
         case IDC_BTN_OPEN_GITHUB:
             OpenCurrentGitHubRepo();
@@ -2915,6 +2979,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         PersistWindowSize();
         projectStore_.Save();
         StopAsyncWork();
+        if (branchToolbarMenu_ != nullptr) {
+            DestroyMenu(branchToolbarMenu_);
+            branchToolbarMenu_ = nullptr;
+        }
+        if (remoteToolbarMenu_ != nullptr) {
+            DestroyMenu(remoteToolbarMenu_);
+            remoteToolbarMenu_ = nullptr;
+        }
         if (commitContextMenu_ != nullptr) {
             DestroyMenu(commitContextMenu_);
             commitContextMenu_ = nullptr;
@@ -2950,10 +3022,13 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 }
 
 void MainWindow::CreateControls() {
-    addFolderButton_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                       0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_ADD_FOLDER), instance_, nullptr);
-    cloneButton_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_CLONE), instance_, nullptr);
+    const darkui::Theme uiTheme = BuildDarkUiTheme();
+    addFolderButtonControl_.Create(hwnd_, IDC_BTN_ADD_FOLDER, L"", uiTheme);
+    cloneButtonControl_.Create(hwnd_, IDC_BTN_CLONE, L"", uiTheme);
+    addFolderButton_ = addFolderButtonControl_.hwnd();
+    cloneButton_ = cloneButtonControl_.hwnd();
+    commandToolbarControl_.Create(hwnd_, 5002, BuildToolbarTheme());
+    commandToolbar_ = commandToolbarControl_.hwnd();
     projectList_ = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                    WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
                                     0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_LIST_PROJECTS), instance_, nullptr);
@@ -2963,30 +3038,20 @@ void MainWindow::CreateControls() {
     logEdit_ = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
                                 WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                                 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_EDIT_LOG), instance_, nullptr);
-    logScrollBar_ = CreateWindowExW(0, kDarkScrollBarClass, L"",
-                                    WS_CHILD,
-                                    0, 0, 0, 0, hwnd_, nullptr, instance_, nullptr);
-
-    buttonStatus_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_STATUS), instance_, nullptr);
-    buttonCommit_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_COMMIT), instance_, nullptr);
-    buttonPush_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                  0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_PUSH), instance_, nullptr);
-    buttonPull_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                  0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_PULL), instance_, nullptr);
-    buttonFetch_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_FETCH), instance_, nullptr);
-    buttonBranch_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_BRANCH), instance_, nullptr);
-    buttonRemote_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                    0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_REMOTE), instance_, nullptr);
-    buttonOpenGitHub_ = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_OWNERDRAW,
-                                        0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_OPEN_GITHUB), instance_, nullptr);
-    progressBar_ = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD,
-                                   0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_PROGRESS_GIT), instance_, nullptr);
-    stopButton_ = CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | BS_OWNERDRAW,
-                                  0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_BTN_STOP), instance_, nullptr);
+    logScrollBarControl_.Create(hwnd_, 5001, true, BuildDarkUiTheme());
+    logScrollBar_ = logScrollBarControl_.hwnd();
+    buttonStatus_ = nullptr;
+    buttonCommit_ = nullptr;
+    buttonPush_ = nullptr;
+    buttonPull_ = nullptr;
+    buttonFetch_ = nullptr;
+    buttonBranch_ = nullptr;
+    buttonRemote_ = nullptr;
+    buttonOpenGitHub_ = nullptr;
+    stopButtonControl_.Create(hwnd_, IDC_BTN_STOP, L"Stop", uiTheme);
+    stopButton_ = stopButtonControl_.hwnd();
+    progressBarControl_.Create(hwnd_, IDC_PROGRESS_GIT, BuildDarkUiTheme());
+    progressBar_ = progressBarControl_.hwnd();
 
     ListView_SetExtendedListViewStyle(projectList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     ListView_SetExtendedListViewStyle(commitList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -3016,20 +3081,12 @@ void MainWindow::CreateControls() {
 
     SetButtonText(IDC_BTN_ADD_FOLDER, IDS_BTN_ADD_FOLDER);
     SetButtonText(IDC_BTN_CLONE, IDS_BTN_CLONE);
-    SetButtonText(IDC_BTN_STATUS, IDS_BTN_STATUS);
-    SetButtonText(IDC_BTN_COMMIT, IDS_BTN_COMMIT);
-    SetButtonText(IDC_BTN_PUSH, IDS_BTN_PUSH);
-    SetButtonText(IDC_BTN_PULL, IDS_BTN_PULL);
-    SetButtonText(IDC_BTN_FETCH, IDS_BTN_FETCH);
-    SetButtonText(IDC_BTN_BRANCH, IDS_BTN_BRANCH);
-    SetButtonText(IDC_BTN_REMOTE, IDS_BTN_REMOTE);
-    SetWindowTextW(buttonOpenGitHub_, L"");
-    SendMessageW(progressBar_, PBM_SETRANGE32, 0, 100);
-    SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
-    SendMessageW(progressBar_, PBM_SETBKCOLOR, 0, DarkTheme::WindowBackground());
-    SendMessageW(progressBar_, PBM_SETBARCOLOR, 0, RGB(76, 175, 80));
+    RefreshCommandToolbar(false);
+    progressBarControl_.SetRange(0, 100);
+    progressBarControl_.SetValue(0);
+    progressBarControl_.SetShowPercentage(false);
+    progressBarControl_.SetSurfaceColor(DarkTheme::WindowBackground());
     ShowWindow(progressBar_, SW_HIDE);
-    SetWindowTextW(stopButton_, L"Stop");
     EnableWindow(stopButton_, FALSE);
     UpdateWindowTitle();
     UpdateCommandButtonsEnabled(false);
@@ -3037,9 +3094,7 @@ void MainWindow::CreateControls() {
 
 void MainWindow::ShowControls() {
     HWND controls[] = {
-        addFolderButton_, cloneButton_, projectList_, commitList_, logEdit_, logScrollBar_,
-        buttonStatus_, buttonCommit_, buttonPush_,
-        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_,
+        addFolderButton_, cloneButton_, commandToolbar_, projectList_, commitList_, logEdit_, logScrollBar_,
         stopButton_
     };
     for (HWND control : controls) {
@@ -3107,7 +3162,7 @@ void MainWindow::SetCommandUiState(bool running, const std::wstring& statusText)
         stopRequested_ = false;
         pendingCommandLineBuffer_.clear();
         if (progressBar_ != nullptr) {
-            SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
+            progressBarControl_.SetValue(0);
             ShowWindow(progressBar_, SW_HIDE);
         }
     }
@@ -3133,24 +3188,90 @@ void MainWindow::RefreshStatusLabelVisual() {
     RedrawWindow(hwnd_, &statusTextRect_, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
 }
 
-void MainWindow::UpdateCommandButtonsEnabled(bool running) {
-    const BOOL enabled = running ? FALSE : TRUE;
+void MainWindow::RefreshCommandToolbar(bool running) {
+    if (commandToolbar_ == nullptr) {
+        return;
+    }
+
     const std::wstring selectedPath = GetSelectedProjectPath();
     const bool hasSelectedGitRepo =
         !running && !selectedPath.empty() && GitRunner::IsGitRepository(selectedPath);
-    HWND buttons[] = {
-        cloneButton_, buttonStatus_, buttonCommit_, buttonPush_,
-        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_
-    };
-    for (HWND button : buttons) {
-        if (button != nullptr) {
-            EnableWindow(button, enabled);
-        }
+    if (branchToolbarMenu_ != nullptr) {
+        DestroyMenu(branchToolbarMenu_);
+        branchToolbarMenu_ = nullptr;
+    }
+    if (remoteToolbarMenu_ != nullptr) {
+        DestroyMenu(remoteToolbarMenu_);
+        remoteToolbarMenu_ = nullptr;
+    }
+    branchToolbarMenu_ = BuildBranchToolbarMenu(hasSelectedGitRepo);
+    remoteToolbarMenu_ = BuildRemoteToolbarMenu();
+
+    std::vector<darkui::ToolbarItem> items;
+    items.push_back({LoadStringResource(IDS_BTN_STATUS), IDC_BTN_STATUS, nullptr, nullptr, 0, false, false, running, false, false, false});
+    items.push_back({LoadStringResource(IDS_BTN_COMMIT), IDC_BTN_COMMIT, nullptr, nullptr, 0, false, false, running, false, false, false});
+    items.push_back({LoadStringResource(IDS_BTN_PUSH), IDC_BTN_PUSH, nullptr, nullptr, 0, false, false, running, false, false, false});
+    items.push_back({LoadStringResource(IDS_BTN_PULL), IDC_BTN_PULL, nullptr, nullptr, 0, false, false, running, false, false, false});
+    items.push_back({LoadStringResource(IDS_BTN_FETCH), IDC_BTN_FETCH, nullptr, nullptr, 0, false, false, running, false, false, false});
+    items.push_back({LoadStringResource(IDS_BTN_BRANCH), IDC_BTN_BRANCH, nullptr, branchToolbarMenu_, 0, false, false, !hasSelectedGitRepo, false, false, true});
+    items.push_back({LoadStringResource(IDS_BTN_REMOTE), IDC_BTN_REMOTE, nullptr, remoteToolbarMenu_, 0, false, false, !hasSelectedGitRepo, false, false, true});
+    darkui::ToolbarItem githubItem;
+    githubItem.text = L"GitHub";
+    githubItem.commandId = IDC_BTN_OPEN_GITHUB;
+    githubItem.icon = GetGitHubIcon();
+    githubItem.disabled = !hasSelectedGitRepo;
+    githubItem.alignRight = true;
+    githubItem.iconOnly = true;
+    items.push_back(githubItem);
+    commandToolbarControl_.SetItems(items);
+}
+
+void MainWindow::UpdateCommandButtonsEnabled(bool running) {
+    const std::wstring selectedPath = GetSelectedProjectPath();
+    EnableWindow(cloneButton_, running ? FALSE : TRUE);
+    RefreshCommandToolbar(running);
+}
+
+HMENU MainWindow::BuildBranchToolbarMenu(bool enabled) {
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return nullptr;
     }
 
-    if (buttonOpenGitHub_ != nullptr) {
-        EnableWindow(buttonOpenGitHub_, hasSelectedGitRepo ? TRUE : FALSE);
+    UINT stateFlags = enabled ? MF_STRING : (MF_STRING | MF_GRAYED);
+    AppendMenuW(menu, stateFlags, IDM_BRANCH_CREATE, L"+ Create Branch");
+    AppendMenuW(menu, stateFlags, IDM_BRANCH_RENAME, L"Rename Current Branch");
+    AppendMenuW(menu, stateFlags, IDM_BRANCH_SQUASH, L"Squash Local Commits");
+    AppendMenuW(menu, stateFlags, IDM_BRANCH_DELETE, L"Delete Branch");
+
+    if (!enabled) {
+        return menu;
     }
+
+    const std::wstring path = GetSelectedProjectPath();
+    cachedBranches_ = GitRunner::GetLocalBranches(path);
+    const std::wstring currentBranch = GitRunner::GetCurrentBranch(path);
+    if (!cachedBranches_.empty()) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        for (size_t i = 0; i < cachedBranches_.size(); ++i) {
+            UINT flags = MF_STRING;
+            if (cachedBranches_[i] == currentBranch) {
+                flags |= MF_CHECKED;
+            }
+            AppendMenuW(menu, flags, IDM_BRANCH_BASE + static_cast<UINT>(i), cachedBranches_[i].c_str());
+        }
+    }
+    return menu;
+}
+
+HMENU MainWindow::BuildRemoteToolbarMenu() {
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return nullptr;
+    }
+    AppendMenuW(menu, MF_STRING, IDM_REMOTE_SHOW, L"Show Remotes");
+    AppendMenuW(menu, MF_STRING, IDM_REMOTE_SET_ORIGIN, L"Set Origin");
+    return menu;
 }
 
 void MainWindow::LayoutControls(int width, int height) {
@@ -3171,15 +3292,7 @@ void MainWindow::LayoutControls(int width, int height) {
     MoveWindow(projectList_, kPadding, 54, kLeftPanelWidth - kPadding, height - 66, TRUE);
     UpdateProjectListColumnWidth(kLeftPanelWidth - kPadding);
 
-    const int buttonWidth = 92;
-    const int buttonGap = 8;
-    HWND buttons[] = {buttonStatus_, buttonCommit_, buttonPush_,
-                      buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_};
-    for (int i = 0; i < 7; ++i) {
-        MoveWindow(buttons[i], rightX + i * (buttonWidth + buttonGap), kPadding, buttonWidth, 30, TRUE);
-    }
-    const int iconButtonSize = 30;
-    MoveWindow(buttonOpenGitHub_, rightX + rightWidth - iconButtonSize, kPadding, iconButtonSize, iconButtonSize, TRUE);
+    MoveWindow(commandToolbar_, rightX, kPadding, rightWidth, 48, TRUE);
 
     MoveWindow(commitList_, rightX, contentTop, rightWidth, paneHeight, TRUE);
     UpdateCommitListColumnWidths(rightWidth);
@@ -3227,7 +3340,13 @@ void MainWindow::UpdateLogScrollBar() {
         return;
     }
     ShowScrollBar(logEdit_, SB_VERT, FALSE);
-    InvalidateRect(logScrollBar_, nullptr, TRUE);
+    const int lineCount = std::max(1, static_cast<int>(SendMessageW(logEdit_, EM_GETLINECOUNT, 0, 0)));
+    const int visibleLines = GetVisibleLogLines(logEdit_, logFont_ != nullptr ? logFont_ : uiFont_);
+    const int maxPos = std::max(0, lineCount - visibleLines);
+    const int firstLine = static_cast<int>(SendMessageW(logEdit_, EM_GETFIRSTVISIBLELINE, 0, 0));
+    logScrollBarControl_.SetRange(0, maxPos);
+    logScrollBarControl_.SetPageSize(visibleLines);
+    logScrollBarControl_.SetValue(firstLine);
 }
 
 void MainWindow::ScrollLogToPosition(int position) {
@@ -3487,7 +3606,7 @@ void MainWindow::AppendCommandOutputChunk(const std::wstring& text) {
             flushVisible();
             if (!stopRequested_ && progressBar_ != nullptr) {
                 ShowWindow(progressBar_, SW_SHOW);
-                SendMessageW(progressBar_, PBM_SETPOS, percent, 0);
+                progressBarControl_.SetValue(percent);
             }
             if (!stopRequested_) {
                 std::wstring status = label + L" " + std::to_wstring(percent) + L"%";
@@ -3565,7 +3684,7 @@ void MainWindow::FlushPendingCommandOutput() {
 void MainWindow::ResetGitProgress() {
     pendingCommandLineBuffer_.clear();
     if (progressBar_ != nullptr) {
-        SendMessageW(progressBar_, PBM_SETPOS, 0, 0);
+        progressBarControl_.SetValue(0);
         ShowWindow(progressBar_, SW_HIDE);
     }
     paintedStatusText_ = baseStatusText_;
@@ -4243,9 +4362,9 @@ void MainWindow::ShowBranchMenu() {
         AppendMenuW(menu, flags, IDM_BRANCH_BASE + static_cast<UINT>(i), cachedBranches_[i].c_str());
     }
 
-    RECT rect{};
-    GetWindowRect(buttonBranch_, &rect);
-    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd_, nullptr);
+    POINT point{};
+    GetCursorPos(&point);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, point.x, point.y, 0, hwnd_, nullptr);
     DestroyMenu(menu);
 }
 
@@ -4300,13 +4419,12 @@ void MainWindow::HandleBranchMenuCommand(UINT commandId) {
 }
 
 void MainWindow::ShowRemoteMenu() {
-    RECT rect{};
-    GetWindowRect(buttonRemote_, &rect);
-
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_REMOTE_SHOW, L"Show Remotes");
     AppendMenuW(menu, MF_STRING, IDM_REMOTE_SET_ORIGIN, L"Set Origin");
-    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd_, nullptr);
+    POINT point{};
+    GetCursorPos(&point);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, point.x, point.y, 0, hwnd_, nullptr);
     DestroyMenu(menu);
 }
 

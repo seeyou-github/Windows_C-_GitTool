@@ -4,6 +4,8 @@
 #include "CommitRepository.h"
 #include "ProjectStore.h"
 
+#include "darkui/darkui.h"
+
 #include <richedit.h>
 #include <windows.h>
 #include <functional>
@@ -87,6 +89,9 @@ private:
     void SetWindowTextFromString(int stringId);
     void UpdateWindowTitle();
     void UpdateCommandButtonsEnabled(bool running);
+    void RefreshCommandToolbar(bool running);
+    HMENU BuildBranchToolbarMenu(bool enabled);
+    HMENU BuildRemoteToolbarMenu();
     std::wstring GetGitHubWebUrlForRepo(const std::wstring& repoPath) const;
     std::wstring PromptForText(
         int titleId,
@@ -104,12 +109,26 @@ private:
 
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
+    darkui::Button addFolderButtonControl_;
+    darkui::Button cloneButtonControl_;
     HWND addFolderButton_ = nullptr;
     HWND cloneButton_ = nullptr;
     HWND projectList_ = nullptr;
     HWND commitList_ = nullptr;
     HWND logEdit_ = nullptr;
+    darkui::ScrollBar logScrollBarControl_;
     HWND logScrollBar_ = nullptr;
+    darkui::Toolbar commandToolbarControl_;
+    HWND commandToolbar_ = nullptr;
+    darkui::Button buttonStatusControl_;
+    darkui::Button buttonCommitControl_;
+    darkui::Button buttonPushControl_;
+    darkui::Button buttonPullControl_;
+    darkui::Button buttonFetchControl_;
+    darkui::Button buttonBranchControl_;
+    darkui::Button buttonRemoteControl_;
+    darkui::Button buttonOpenGitHubControl_;
+    darkui::Button stopButtonControl_;
     HWND buttonStatus_ = nullptr;
     HWND buttonCommit_ = nullptr;
     HWND buttonPush_ = nullptr;
@@ -119,6 +138,7 @@ private:
     HWND buttonRemote_ = nullptr;
     HWND buttonOpenGitHub_ = nullptr;
     HWND stopButton_ = nullptr;
+    darkui::ProgressBar progressBarControl_;
     HWND progressBar_ = nullptr;
     HFONT uiFont_ = nullptr;
     HFONT projectListFont_ = nullptr;
@@ -130,6 +150,8 @@ private:
     ProjectStore projectStore_;
     CommitRepository commitRepository_;
     bool commandRunning_ = false;
+    HMENU branchToolbarMenu_ = nullptr;
+    HMENU remoteToolbarMenu_ = nullptr;
     std::vector<std::wstring> cachedBranches_;
     HMENU commitContextMenu_ = nullptr;
     bool logScrollDragging_ = false;
