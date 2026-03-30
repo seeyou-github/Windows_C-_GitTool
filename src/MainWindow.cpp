@@ -571,6 +571,8 @@ struct CommitComposeWindowState {
     HFONT uiFont = nullptr;
     HFONT codeFont = nullptr;
     WNDPROC editProc = nullptr;
+    bool initializingChecks = false;
+    bool selectAllActive = false;
     bool accepted = false;
 };
 
@@ -628,6 +630,13 @@ void UpdateCommitComposeOkState(CommitComposeWindowState* state) {
     }
     const bool hasChecked = std::any_of(state->checked.begin(), state->checked.end(), [](bool value) { return value; });
     EnableWindow(state->okButton, hasChecked ? TRUE : FALSE);
+}
+
+void UpdateCommitComposeSelectAllButton(CommitComposeWindowState* state) {
+    if (state == nullptr || state->selectAllButton == nullptr) {
+        return;
+    }
+    SetWindowTextW(state->selectAllButton, state->selectAllActive ? L"\u53d6\u6d88\u5168\u9009" : L"\u5168\u9009");
 }
 
 void UpdateSquashComposeOkState(SquashComposeWindowState* state) {
@@ -1291,7 +1300,7 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             0, L"STATIC", L"Select files to stage, then double-click a diff file to compare.",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
         state->selectAllButton = CreateWindowExW(
-            0, L"BUTTON", L"Select All",
+            0, L"BUTTON", L"\u5168\u9009",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4303), cs->hInstance, nullptr);
         state->messageLabel = CreateWindowExW(
@@ -1338,6 +1347,7 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         state->editProc = reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(state->messageEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(CommitComposeEditProc)));
 
+        state->initializingChecks = true;
         state->checked.assign(state->diffs.size(), true);
         for (size_t i = 0; i < state->diffs.size(); ++i) {
             LVITEMW item{};
@@ -1349,6 +1359,9 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             ListView_InsertItem(state->fileList, &item);
             ListView_SetCheckState(state->fileList, static_cast<int>(i), TRUE);
         }
+        state->initializingChecks = false;
+        state->selectAllActive = false;
+        UpdateCommitComposeSelectAllButton(state);
         UpdateCommitComposeOkState(state);
         SetFocus(state->messageEdit);
         return 0;
@@ -1383,10 +1396,19 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         auto* header = reinterpret_cast<NMHDR*>(lParam);
         if (state != nullptr && header != nullptr && header->hwndFrom == state->fileList) {
             if (header->code == LVN_ITEMCHANGED) {
+                if (state->initializingChecks) {
+                    return 0;
+                }
                 const int count = ListView_GetItemCount(state->fileList);
+                bool allChecked = count > 0;
                 for (int i = 0; i < count && i < static_cast<int>(state->checked.size()); ++i) {
                     state->checked[i] = ListView_GetCheckState(state->fileList, i) != FALSE;
+                    if (!state->checked[i]) {
+                        allChecked = false;
+                    }
                 }
+                state->selectAllActive = allChecked;
+                UpdateCommitComposeSelectAllButton(state);
                 UpdateCommitComposeOkState(state);
                 return 0;
             }
@@ -1439,12 +1461,14 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
     case WM_COMMAND:
         if (LOWORD(wParam) == 4303 && state != nullptr) {
             const int count = ListView_GetItemCount(state->fileList);
+            state->selectAllActive = !state->selectAllActive;
             for (int i = 0; i < count; ++i) {
-                ListView_SetCheckState(state->fileList, i, TRUE);
+                ListView_SetCheckState(state->fileList, i, state->selectAllActive ? TRUE : FALSE);
                 if (i < static_cast<int>(state->checked.size())) {
-                    state->checked[i] = true;
+                    state->checked[i] = state->selectAllActive;
                 }
             }
+            UpdateCommitComposeSelectAllButton(state);
             UpdateCommitComposeOkState(state);
             return 0;
         }
