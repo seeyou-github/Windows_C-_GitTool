@@ -479,42 +479,54 @@ std::vector<CommitFileDiff> GitRunner::GetWorkingTreeDiffs(const std::wstring& r
     std::vector<CommitFileDiff> diffs;
     const GitCommandResult result = RunGitCommand(
         repoPath,
-        {L"status", L"--short", L"--untracked-files=all"});
+        {L"status", L"--porcelain=v1", L"-z", L"--untracked-files=all"});
     if (!result.success) {
         return diffs;
     }
 
-    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
-        if (line.size() < 3) {
+    size_t index = 0;
+    while (index < result.output.size()) {
+        const size_t terminatorPos = result.output.find(L'\0', index);
+        if (terminatorPos == std::wstring::npos || terminatorPos - index < 4) {
+            break;
+        }
+
+        const std::wstring entry = result.output.substr(index, terminatorPos - index);
+        index = terminatorPos + 1;
+
+        if (entry.size() < 4) {
             continue;
         }
 
         CommitFileDiff diff;
-        if (line.rfind(L"?? ", 0) == 0) {
+        if (entry.rfind(L"?? ", 0) == 0) {
             diff.status = L'A';
-            diff.path = line.substr(3);
+            diff.path = entry.substr(3);
             diff.oldPath.clear();
             diff.newPath = diff.path;
             diff.patchPath = diff.path;
         } else {
-            const wchar_t x = line[0];
-            const wchar_t y = line[1];
-            const std::wstring pathText = line.substr(3);
+            const wchar_t x = entry[0];
+            const wchar_t y = entry[1];
+            const std::wstring pathText = entry.substr(3);
 
             if (x == L'R' || y == L'R') {
-                diff.status = L'R';
-                const size_t arrowPos = pathText.find(L" -> ");
-                if (arrowPos != std::wstring::npos) {
-                    diff.oldPath = pathText.substr(0, arrowPos);
-                    diff.newPath = pathText.substr(arrowPos + 4);
-                    diff.path = diff.oldPath + L" -> " + diff.newPath;
-                    diff.patchPath = diff.newPath;
-                } else {
-                    diff.path = pathText;
-                    diff.oldPath = pathText;
-                    diff.newPath = pathText;
-                    diff.patchPath = pathText;
+                if (index >= result.output.size()) {
+                    continue;
                 }
+
+                const size_t renameTerminatorPos = result.output.find(L'\0', index);
+                if (renameTerminatorPos == std::wstring::npos) {
+                    break;
+                }
+
+                const std::wstring renamedPath = result.output.substr(index, renameTerminatorPos - index);
+                index = renameTerminatorPos + 1;
+                diff.status = L'R';
+                diff.oldPath = pathText;
+                diff.newPath = renamedPath;
+                diff.path = diff.oldPath + L" -> " + diff.newPath;
+                diff.patchPath = diff.newPath;
             } else if (x == L'D' || y == L'D') {
                 diff.status = L'D';
                 diff.path = pathText;

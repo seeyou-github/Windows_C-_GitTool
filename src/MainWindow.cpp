@@ -27,6 +27,7 @@ constexpr wchar_t kCommitComposeWindowClass[] = L"GitVisualToolCommitComposeWind
 constexpr wchar_t kSquashComposeWindowClass[] = L"GitVisualToolSquashComposeWindow";
 constexpr wchar_t kCloneWindowClass[] = L"GitVisualToolCloneWindow";
 constexpr wchar_t kDeleteBranchWindowClass[] = L"GitVisualToolDeleteBranchWindow";
+constexpr wchar_t kConfirmWindowClass[] = L"GitVisualToolConfirmWindow";
 constexpr UINT WM_APP_GIT_COMMAND_DONE = WM_APP + 1;
 constexpr UINT WM_APP_COMMITS_REFRESH_DONE = WM_APP + 2;
 constexpr UINT WM_APP_GIT_COMMAND_OUTPUT = WM_APP + 3;
@@ -96,6 +97,16 @@ darkui::Theme BuildToolbarTheme() {
     theme.toolbarItem = RGB(46, 50, 58);
     theme.toolbarItemHot = RGB(58, 64, 74);
     theme.toolbarItemActive = RGB(72, 80, 92);
+    return theme;
+}
+
+darkui::Theme BuildDangerButtonTheme() {
+    darkui::Theme theme = BuildDarkUiTheme();
+    theme.button = RGB(92, 34, 38);
+    theme.buttonHover = RGB(120, 42, 47);
+    theme.buttonHot = RGB(146, 52, 58);
+    theme.buttonDisabled = RGB(66, 40, 42);
+    theme.buttonDisabledText = RGB(132, 118, 120);
     return theme;
 }
 
@@ -624,9 +635,11 @@ struct CommitComposeWindowState {
     HWND fileList = nullptr;
     HWND selectAllButton = nullptr;
     HWND messageEdit = nullptr;
+    HWND resetButton = nullptr;
     HWND okButton = nullptr;
     HWND cancelButton = nullptr;
     darkui::Button selectAllButtonControl;
+    darkui::Button resetButtonControl;
     darkui::Button okButtonControl;
     darkui::Button cancelButtonControl;
     HWND hintLabel = nullptr;
@@ -697,12 +710,33 @@ struct DeleteBranchWindowState {
     bool accepted = false;
 };
 
+struct ConfirmWindowState {
+    HWND parent = nullptr;
+    std::wstring title;
+    std::wstring message;
+    darkui::Button confirmButtonControl;
+    darkui::Button cancelButtonControl;
+    HWND messageLabel = nullptr;
+    HWND confirmButton = nullptr;
+    HWND cancelButton = nullptr;
+    HFONT uiFont = nullptr;
+    bool accepted = false;
+};
+
 void UpdateCommitComposeOkState(CommitComposeWindowState* state) {
     if (state == nullptr || state->okButton == nullptr) {
         return;
     }
     const bool hasChecked = std::any_of(state->checked.begin(), state->checked.end(), [](bool value) { return value; });
     EnableWindow(state->okButton, hasChecked ? TRUE : FALSE);
+}
+
+void UpdateCommitComposeResetState(CommitComposeWindowState* state) {
+    if (state == nullptr || state->resetButton == nullptr) {
+        return;
+    }
+    const bool hasChecked = std::any_of(state->checked.begin(), state->checked.end(), [](bool value) { return value; });
+    EnableWindow(state->resetButton, hasChecked ? TRUE : FALSE);
 }
 
 void UpdateCommitComposeSelectAllButton(CommitComposeWindowState* state) {
@@ -795,6 +829,79 @@ std::vector<std::wstring> GetCommitComposeSelectedPaths(const CommitComposeWindo
         }
     }
     return selectedPaths;
+}
+
+void ReloadCommitComposeFileList(CommitComposeWindowState* state) {
+    if (state == nullptr || state->fileList == nullptr) {
+        return;
+    }
+
+    state->diffs = GitRunner::GetWorkingTreeDiffs(state->repoPath);
+    state->checked.assign(state->diffs.size(), true);
+    state->selectedPaths.clear();
+    state->initializingChecks = true;
+    ListView_DeleteAllItems(state->fileList);
+    for (size_t i = 0; i < state->diffs.size(); ++i) {
+        LVITEMW item{};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = static_cast<int>(i);
+        std::wstring label;
+        label += state->diffs[i].status;
+        label += L"  ";
+        label += state->diffs[i].path;
+        item.pszText = const_cast<LPWSTR>(label.c_str());
+        item.lParam = static_cast<LPARAM>(i);
+        ListView_InsertItem(state->fileList, &item);
+        ListView_SetCheckState(state->fileList, static_cast<int>(i), TRUE);
+    }
+    state->initializingChecks = false;
+    state->selectAllActive = !state->diffs.empty();
+    UpdateCommitComposeSelectAllButton(state);
+    UpdateCommitComposeOkState(state);
+    UpdateCommitComposeResetState(state);
+}
+
+bool ShowDarkConfirmDialog(HWND parent, HINSTANCE instance, HFONT uiFont, const std::wstring& title, const std::wstring& message, const std::wstring& confirmText) {
+    auto* state = new ConfirmWindowState();
+    state->parent = parent;
+    state->title = title;
+    state->message = message;
+    state->uiFont = uiFont;
+
+    RECT parentRect{};
+    GetWindowRect(parent, &parentRect);
+    const int width = 460;
+    const int height = 190;
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(parent, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kConfirmWindowClass,
+        title.c_str(),
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
+        x, y, width, height,
+        nullptr, nullptr, instance, state);
+    if (dialog == nullptr) {
+        EnableWindow(parent, TRUE);
+        delete state;
+        return false;
+    }
+
+    SetWindowTextW(state->confirmButton, confirmText.c_str());
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool accepted = state->accepted;
+    delete state;
+    return accepted;
 }
 
 COLORREF GetCommitStatusColor(wchar_t status) {
@@ -1386,6 +1493,8 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
                 WS_VSCROLL | WS_TABSTOP,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4302), cs->hInstance, nullptr);
+        state->resetButtonControl.Create(hwnd, 4304, L"Reset", BuildDarkUiTheme());
+        state->resetButton = state->resetButtonControl.hwnd();
         state->okButtonControl.Create(hwnd, IDOK, L"OK", BuildDarkUiTheme());
         state->okButton = state->okButtonControl.hwnd();
         state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
@@ -1424,9 +1533,10 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             ListView_SetCheckState(state->fileList, static_cast<int>(i), TRUE);
         }
         state->initializingChecks = false;
-        state->selectAllActive = false;
+        state->selectAllActive = !state->diffs.empty();
         UpdateCommitComposeSelectAllButton(state);
         UpdateCommitComposeOkState(state);
+        UpdateCommitComposeResetState(state);
         SetFocus(state->messageEdit);
         return 0;
     }
@@ -1451,6 +1561,7 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             MoveWindow(state->messageLabel, rightX, padding, rightWidth, labelHeight, TRUE);
             MoveWindow(state->fileList, padding, contentTop, leftWidth, contentHeight, TRUE);
             MoveWindow(state->messageEdit, rightX, contentTop, rightWidth, contentHeight, TRUE);
+            MoveWindow(state->resetButton, padding, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
             MoveWindow(state->cancelButton, rc.right - padding - 96, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
             MoveWindow(state->okButton, rc.right - padding - 96 - 104, rc.bottom - padding - footerHeight, 96, footerHeight, TRUE);
             ListView_SetColumnWidth(state->fileList, 0, std::max(180, leftWidth - 24));
@@ -1474,6 +1585,7 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
                 state->selectAllActive = allChecked;
                 UpdateCommitComposeSelectAllButton(state);
                 UpdateCommitComposeOkState(state);
+                UpdateCommitComposeResetState(state);
                 return 0;
             }
             if (header->code == NM_DBLCLK) {
@@ -1534,6 +1646,75 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             }
             UpdateCommitComposeSelectAllButton(state);
             UpdateCommitComposeOkState(state);
+            UpdateCommitComposeResetState(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == 4304 && state != nullptr) {
+            if (!ShowDarkConfirmDialog(
+                    hwnd,
+                    reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)),
+                    state->uiFont,
+                    L"Confirm Reset",
+                    L"Reset the checked files to HEAD?\r\n\r\nThis will discard their current working tree and staged changes.",
+                    L"Reset")) {
+                return 0;
+            }
+
+            std::vector<std::wstring> restorePaths;
+            std::vector<std::wstring> removePaths;
+            for (size_t i = 0; i < state->diffs.size() && i < state->checked.size(); ++i) {
+                if (!state->checked[i]) {
+                    continue;
+                }
+
+                const CommitFileDiff& diff = state->diffs[i];
+                if (diff.status == L'A') {
+                    if (!diff.patchPath.empty()) {
+                        removePaths.push_back(diff.patchPath);
+                    }
+                    continue;
+                }
+
+                if (diff.status == L'R') {
+                    if (!diff.oldPath.empty()) {
+                        restorePaths.push_back(diff.oldPath);
+                    }
+                    if (!diff.newPath.empty() && diff.newPath != diff.oldPath) {
+                        restorePaths.push_back(diff.newPath);
+                    }
+                    continue;
+                }
+
+                const std::wstring& path = diff.status == L'D' ? diff.oldPath : diff.patchPath;
+                if (!path.empty()) {
+                    restorePaths.push_back(path);
+                }
+            }
+
+            bool success = true;
+            std::wstring output;
+            if (!restorePaths.empty()) {
+                std::vector<std::wstring> args = {L"restore", L"--source=HEAD", L"--staged", L"--worktree", L"--"};
+                args.insert(args.end(), restorePaths.begin(), restorePaths.end());
+                const GitCommandResult result = GitRunner::RunGitCommand(state->repoPath, args);
+                success = result.success;
+                output += result.output;
+            }
+            if (success && !removePaths.empty()) {
+                std::vector<std::wstring> args = {L"clean", L"-f", L"--"};
+                args.insert(args.end(), removePaths.begin(), removePaths.end());
+                const GitCommandResult result = GitRunner::RunGitCommand(state->repoPath, args);
+                success = result.success;
+                output += result.output;
+            }
+
+            if (!success) {
+                const std::wstring details = output.empty() ? L"Failed to reset selected files to HEAD." : output;
+                MessageBoxW(hwnd, details.c_str(), state->title.c_str(), MB_ICONERROR);
+                return 0;
+            }
+
+            ReloadCommitComposeFileList(state);
             return 0;
         }
         if (LOWORD(wParam) == IDOK && state != nullptr) {
@@ -2149,6 +2330,82 @@ LRESULT CALLBACK CommitDetailWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<ConfirmWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<ConfirmWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->messageLabel = CreateWindowExW(
+            0, L"STATIC", state->message.c_str(),
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->confirmButtonControl.Create(hwnd, IDOK, L"Confirm", BuildDangerButtonTheme());
+        state->confirmButton = state->confirmButtonControl.hwnd();
+        state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
+        state->cancelButton = state->cancelButtonControl.hwnd();
+
+        HWND controls[] = {state->messageLabel, state->confirmButton, state->cancelButton};
+        for (HWND control : controls) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        }
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 16;
+            const int buttonHeight = 34;
+            MoveWindow(state->messageLabel, padding, padding, rc.right - padding * 2, 78, TRUE);
+            MoveWindow(state->cancelButton, rc.right - padding - 96, rc.bottom - padding - buttonHeight, 96, buttonHeight, TRUE);
+            MoveWindow(state->confirmButton, rc.right - padding - 200, rc.bottom - padding - buttonHeight, 96, buttonHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == IDOK) {
+            state->accepted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (state != nullptr && state->parent != nullptr && IsWindow(state->parent)) {
+            EnableWindow(state->parent, TRUE);
+            SetForegroundWindow(state->parent);
+            SetActiveWindow(state->parent);
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
 INT_PTR CALLBACK PromptDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<PromptDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (message) {
@@ -2321,6 +2578,15 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     composeClass.hbrBackground = DarkTheme::WindowBrush();
     composeClass.lpszClassName = kCommitComposeWindowClass;
     RegisterClassExW(&composeClass);
+
+    WNDCLASSEXW confirmClass{};
+    confirmClass.cbSize = sizeof(confirmClass);
+    confirmClass.lpfnWndProc = ConfirmWindowProc;
+    confirmClass.hInstance = instance_;
+    confirmClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    confirmClass.hbrBackground = DarkTheme::WindowBrush();
+    confirmClass.lpszClassName = kConfirmWindowClass;
+    RegisterClassExW(&confirmClass);
 
     WNDCLASSEXW squashClass{};
     squashClass.cbSize = sizeof(squashClass);
