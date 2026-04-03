@@ -90,6 +90,7 @@ private:
     void UpdateWindowTitle();
     void UpdateCommandButtonsEnabled(bool running);
     void RefreshCommandToolbar(bool running);
+    void UpdateSelectedRepositoryState(const std::wstring& path, bool known, bool isGitRepository);
     HMENU BuildBranchToolbarMenu(bool enabled);
     HMENU BuildRemoteToolbarMenu();
     std::wstring GetGitHubWebUrlForRepo(const std::wstring& repoPath) const;
@@ -103,7 +104,7 @@ private:
     std::wstring GetExecutableDirectory() const;
     RECT CalculateCenteredWindowRect(int width, int height) const;
     void PrepareInitialShow();
-    void FinalizeInitialShow(int nCmdShow);
+    void FinalizeInitialShow();
     void PersistWindowSize();
     void StopAsyncWork();
 
@@ -150,13 +151,15 @@ private:
     ProjectStore projectStore_;
     CommitRepository commitRepository_;
     bool commandRunning_ = false;
+    bool selectedRepositoryStateKnown_ = false;
+    bool selectedRepositoryIsGit_ = false;
+    bool initialShowPrepared_ = false;
     HMENU branchToolbarMenu_ = nullptr;
     HMENU remoteToolbarMenu_ = nullptr;
     std::vector<std::wstring> cachedBranches_;
     HMENU commitContextMenu_ = nullptr;
     bool logScrollDragging_ = false;
     int logScrollDragOffsetY_ = 0;
-    bool initialShowPrepared_ = false;
     bool suppressProjectSelectionRefresh_ = false;
     HANDLE currentCancelEvent_ = nullptr;
     HANDLE currentCommandThread_ = nullptr;

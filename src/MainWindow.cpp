@@ -31,6 +31,8 @@ constexpr wchar_t kConfirmWindowClass[] = L"GitVisualToolConfirmWindow";
 constexpr UINT WM_APP_GIT_COMMAND_DONE = WM_APP + 1;
 constexpr UINT WM_APP_COMMITS_REFRESH_DONE = WM_APP + 2;
 constexpr UINT WM_APP_GIT_COMMAND_OUTPUT = WM_APP + 3;
+constexpr UINT WM_APP_INITIAL_REFRESH = WM_APP + 4;
+constexpr UINT WM_APP_INITIALIZE_UI = WM_APP + 5;
 constexpr UINT_PTR kLogFlushTimerId = 1;
 constexpr int kToolbarHeight = 58;
 constexpr int kPadding = 12;
@@ -49,6 +51,55 @@ constexpr COLORREF kMenuText = RGB(40, 40, 40);
 constexpr COLORREF kLogDefaultText = RGB(170, 176, 184);
 std::unique_ptr<Gdiplus::Bitmap> g_githubBitmap;
 HICON g_githubIcon = nullptr;
+ULONGLONG g_startupLogBaseTick = GetTickCount64();
+
+std::wstring StartupLogPath() {
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring fullPath = path;
+    const size_t pos = fullPath.find_last_of(L"\\/");
+    const std::wstring dir = pos == std::wstring::npos ? L"." : fullPath.substr(0, pos);
+    return dir + L"\\startup_debug.log";
+}
+
+void AppendStartupLog(const wchar_t* message) {
+    std::wofstream output(StartupLogPath().c_str(), std::ios::app);
+    if (!output.is_open()) {
+        return;
+    }
+    output << L"[" << (GetTickCount64() - g_startupLogBaseTick) << L" ms] " << (message ? message : L"") << L"\r\n";
+}
+
+void PaintMainWindowBackground(HDC dc, const RECT& rect, bool paintedStatusVisible,
+                               const RECT& statusTextRect, const std::wstring& paintedStatusText,
+                               HFONT uiFont) {
+    FillRect(dc, &rect, DarkTheme::WindowBrush());
+
+    RECT leftRect{0, 0, kLeftPanelWidth + kPadding, rect.bottom};
+    FillRect(dc, &leftRect, DarkTheme::PanelBrush());
+
+    HPEN pen = CreatePen(PS_SOLID, 1, DarkTheme::BorderColor());
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    MoveToEx(dc, kLeftPanelWidth + kPadding, 0, nullptr);
+    LineTo(dc, kLeftPanelWidth + kPadding, rect.bottom);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+
+    if (paintedStatusVisible) {
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, DarkTheme::TextColor());
+        HGDIOBJ oldFont = nullptr;
+        if (uiFont != nullptr) {
+            oldFont = SelectObject(dc, uiFont);
+        }
+        RECT textRect = statusTextRect;
+        DrawTextW(dc, paintedStatusText.c_str(), -1, &textRect,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (oldFont != nullptr) {
+            SelectObject(dc, oldFont);
+        }
+    }
+}
 
 darkui::Theme BuildDarkUiTheme(int fontHeight = -18, bool monospace = false) {
     darkui::Theme theme;
@@ -2527,10 +2578,18 @@ std::vector<BYTE> BuildPromptDialogTemplate(bool multiline) {
 MainWindow::MainWindow() = default;
 
 bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
+    g_startupLogBaseTick = GetTickCount64();
+    std::wofstream resetLog(StartupLogPath().c_str(), std::ios::trunc);
+    if (resetLog.is_open()) {
+        resetLog << L"GitVisualTool startup log\r\n";
+    }
+    AppendStartupLog(L"MainWindow::Create begin");
     instance_ = instance;
     projectStore_.Load();
+    AppendStartupLog(L"projectStore_.Load finished");
     cacheDatabase_.SetPath(GetExecutableDirectory() + L"\\GitVisualTool.cache.db");
     cacheDatabase_.Load();
+    AppendStartupLog(L"cacheDatabase_.Load finished");
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -2634,8 +2693,10 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
         this);
 
     if (hwnd_ == nullptr) {
+        AppendStartupLog(L"CreateWindowExW failed");
         return false;
     }
+    AppendStartupLog(L"CreateWindowExW finished");
 
     HICON largeIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
     HICON smallIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
@@ -2647,7 +2708,10 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     }
 
     PrepareInitialShow();
-    FinalizeInitialShow(nCmdShow);
+    ShowWindow(hwnd_, nCmdShow);
+    UpdateWindow(hwnd_);
+    RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    AppendStartupLog(L"initial ShowWindow/UpdateWindow/RedrawWindow finished");
     return true;
 }
 
@@ -2864,21 +2928,43 @@ DWORD WINAPI MainWindow::AsyncCommitRefreshThread(LPVOID param) {
 LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE:
+        AppendStartupLog(L"WM_CREATE begin");
         DarkTheme::ApplyTitleBar(hwnd_);
+        AppendStartupLog(L"ApplyTitleBar finished");
+        PostMessageW(hwnd_, WM_APP_INITIALIZE_UI, 0, 0);
+        AppendStartupLog(L"WM_APP_INITIALIZE_UI posted");
+        return 0;
+    case WM_APP_INITIALIZE_UI:
+        AppendStartupLog(L"WM_APP_INITIALIZE_UI begin");
         CreateControls();
+        AppendStartupLog(L"CreateControls finished");
         ApplyFonts();
+        AppendStartupLog(L"ApplyFonts finished");
         {
             RECT rect{};
             GetClientRect(hwnd_, &rect);
             LayoutControls(rect.right - rect.left, rect.bottom - rect.top);
         }
+        AppendStartupLog(L"LayoutControls finished");
         ClearLog();
         LoadProjectsIntoList();
-        RefreshCurrentRepository();
+        AppendStartupLog(L"LoadProjectsIntoList finished");
         ShowControls();
+        AppendStartupLog(L"ShowControls finished");
+        FinalizeInitialShow();
+        AppendStartupLog(L"FinalizeInitialShow finished");
+        PostMessageW(hwnd_, WM_APP_INITIAL_REFRESH, 0, 0);
+        AppendStartupLog(L"WM_APP_INITIAL_REFRESH posted");
+        return 0;
+    case WM_APP_INITIAL_REFRESH:
+        AppendStartupLog(L"WM_APP_INITIAL_REFRESH begin");
+        RefreshCurrentRepository();
+        AppendStartupLog(L"WM_APP_INITIAL_REFRESH finished");
         return 0;
     case WM_SIZE:
-        LayoutControls(LOWORD(lParam), HIWORD(lParam));
+        if (addFolderButton_ != nullptr) {
+            LayoutControls(LOWORD(lParam), HIWORD(lParam));
+        }
         return 0;
     case WM_APP_COMMITS_REFRESH_DONE: {
         auto* state = reinterpret_cast<AsyncCommitRefreshState*>(lParam);
@@ -3205,39 +3291,29 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
     }
     case WM_ERASEBKGND:
+    {
+        static bool logged = false;
+        if (!logged) {
+            AppendStartupLog(L"first WM_ERASEBKGND");
+            logged = true;
+        }
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        RECT rect{};
+        GetClientRect(hwnd_, &rect);
+        PaintMainWindowBackground(dc, rect, paintedStatusVisible_, statusTextRect_, paintedStatusText_, uiFont_);
         return 1;
+    }
     case WM_PAINT: {
+        static bool logged = false;
+        if (!logged) {
+            AppendStartupLog(L"first WM_PAINT");
+            logged = true;
+        }
         PAINTSTRUCT ps{};
         HDC dc = BeginPaint(hwnd_, &ps);
         RECT rect{};
         GetClientRect(hwnd_, &rect);
-        FillRect(dc, &rect, DarkTheme::WindowBrush());
-
-        RECT leftRect{0, 0, kLeftPanelWidth + kPadding, rect.bottom};
-        FillRect(dc, &leftRect, DarkTheme::PanelBrush());
-
-        HPEN pen = CreatePen(PS_SOLID, 1, DarkTheme::BorderColor());
-        HGDIOBJ oldPen = SelectObject(dc, pen);
-        MoveToEx(dc, kLeftPanelWidth + kPadding, 0, nullptr);
-        LineTo(dc, kLeftPanelWidth + kPadding, rect.bottom);
-        SelectObject(dc, oldPen);
-        DeleteObject(pen);
-
-        if (paintedStatusVisible_) {
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, DarkTheme::TextColor());
-            HGDIOBJ oldFont = nullptr;
-            if (uiFont_ != nullptr) {
-                oldFont = SelectObject(dc, uiFont_);
-            }
-            RECT textRect = statusTextRect_;
-            DrawTextW(dc, paintedStatusText_.c_str(), -1, &textRect,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            if (oldFont != nullptr) {
-                SelectObject(dc, oldFont);
-            }
-        }
-
+        PaintMainWindowBackground(dc, rect, paintedStatusVisible_, statusTextRect_, paintedStatusText_, uiFont_);
         EndPaint(hwnd_, &ps);
         return 0;
     }
@@ -3289,11 +3365,11 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
 void MainWindow::CreateControls() {
     const darkui::Theme uiTheme = BuildDarkUiTheme();
-    addFolderButtonControl_.Create(hwnd_, IDC_BTN_ADD_FOLDER, L"", uiTheme);
-    cloneButtonControl_.Create(hwnd_, IDC_BTN_CLONE, L"", uiTheme);
+    addFolderButtonControl_.Create(hwnd_, IDC_BTN_ADD_FOLDER, L"", uiTheme, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
+    cloneButtonControl_.Create(hwnd_, IDC_BTN_CLONE, L"", uiTheme, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
     addFolderButton_ = addFolderButtonControl_.hwnd();
     cloneButton_ = cloneButtonControl_.hwnd();
-    commandToolbarControl_.Create(hwnd_, 5002, BuildToolbarTheme());
+    commandToolbarControl_.Create(hwnd_, 5002, BuildToolbarTheme(), WS_CHILD | WS_TABSTOP);
     commandToolbar_ = commandToolbarControl_.hwnd();
     projectList_ = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                    WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER,
@@ -3304,7 +3380,7 @@ void MainWindow::CreateControls() {
     logEdit_ = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
                                 WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                                 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_EDIT_LOG), instance_, nullptr);
-    logScrollBarControl_.Create(hwnd_, 5001, true, BuildDarkUiTheme());
+    logScrollBarControl_.Create(hwnd_, 5001, true, BuildDarkUiTheme(), WS_CHILD | WS_TABSTOP);
     logScrollBar_ = logScrollBarControl_.hwnd();
     buttonStatus_ = nullptr;
     buttonCommit_ = nullptr;
@@ -3314,9 +3390,9 @@ void MainWindow::CreateControls() {
     buttonBranch_ = nullptr;
     buttonRemote_ = nullptr;
     buttonOpenGitHub_ = nullptr;
-    stopButtonControl_.Create(hwnd_, IDC_BTN_STOP, L"Stop", uiTheme);
+    stopButtonControl_.Create(hwnd_, IDC_BTN_STOP, L"Stop", uiTheme, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
     stopButton_ = stopButtonControl_.hwnd();
-    progressBarControl_.Create(hwnd_, IDC_PROGRESS_GIT, BuildDarkUiTheme());
+    progressBarControl_.Create(hwnd_, IDC_PROGRESS_GIT, BuildDarkUiTheme(), WS_CHILD);
     progressBar_ = progressBarControl_.hwnd();
 
     ListView_SetExtendedListViewStyle(projectList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -3368,6 +3444,7 @@ void MainWindow::ShowControls() {
     }
     ShowWindow(progressBar_, SW_HIDE);
     ShowScrollBar(logEdit_, SB_VERT, FALSE);
+    RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 void MainWindow::StopAsyncWork() {
@@ -3459,9 +3536,7 @@ void MainWindow::RefreshCommandToolbar(bool running) {
         return;
     }
 
-    const std::wstring selectedPath = GetSelectedProjectPath();
-    const bool hasSelectedGitRepo =
-        !running && !selectedPath.empty() && GitRunner::IsGitRepository(selectedPath);
+    const bool hasSelectedGitRepo = !running && selectedRepositoryStateKnown_ && selectedRepositoryIsGit_;
     if (branchToolbarMenu_ != nullptr) {
         DestroyMenu(branchToolbarMenu_);
         branchToolbarMenu_ = nullptr;
@@ -3493,9 +3568,20 @@ void MainWindow::RefreshCommandToolbar(bool running) {
 }
 
 void MainWindow::UpdateCommandButtonsEnabled(bool running) {
-    const std::wstring selectedPath = GetSelectedProjectPath();
     EnableWindow(cloneButton_, running ? FALSE : TRUE);
     RefreshCommandToolbar(running);
+}
+
+void MainWindow::UpdateSelectedRepositoryState(
+    const std::wstring& path,
+    bool known,
+    bool isGitRepository) {
+    const std::wstring selectedPath = GetSelectedProjectPath();
+    if (path != selectedPath) {
+        return;
+    }
+    selectedRepositoryStateKnown_ = known;
+    selectedRepositoryIsGit_ = known && isGitRepository;
 }
 
 HMENU MainWindow::BuildBranchToolbarMenu(bool enabled) {
@@ -3694,6 +3780,8 @@ void MainWindow::RefreshCurrentRepository() {
         UpdateWindowTitle();
         ClearLog();
         currentProjectPath_.clear();
+        selectedRepositoryStateKnown_ = false;
+        selectedRepositoryIsGit_ = false;
         UpdateCommandButtonsEnabled(commandRunning_);
         return;
     }
@@ -3703,12 +3791,15 @@ void MainWindow::RefreshCurrentRepository() {
         ClearLog();
     }
 
+    UpdateSelectedRepositoryState(path, false, false);
     projectStore_.SetLastProject(path);
     projectStore_.Save();
     UpdateWindowTitle();
+    const bool isGitRepository = GitRunner::IsGitRepository(path);
+    UpdateSelectedRepositoryState(path, true, isGitRepository);
     UpdateCommandButtonsEnabled(commandRunning_);
 
-    if (!GitRunner::IsGitRepository(path)) {
+    if (!isGitRepository) {
         ShowCommitPlaceholder(LoadStringResource(IDS_MSG_NOT_GIT_REPO_HINT));
         return;
     }
@@ -3723,7 +3814,7 @@ void MainWindow::RefreshCommitList() {
         return;
     }
 
-    if (!GitRunner::IsGitRepository(path)) {
+    if (!selectedRepositoryStateKnown_ || !selectedRepositoryIsGit_) {
         ShowCommitPlaceholder(LoadStringResource(IDS_MSG_NOT_GIT_REPO_HINT));
         return;
     }
@@ -4955,14 +5046,10 @@ void MainWindow::PrepareInitialShow() {
     initialShowPrepared_ = true;
 }
 
-void MainWindow::FinalizeInitialShow(int nCmdShow) {
+void MainWindow::FinalizeInitialShow() {
     if (!initialShowPrepared_) {
-        ShowWindow(hwnd_, nCmdShow);
-        UpdateWindow(hwnd_);
         return;
     }
-
-    ShowWindow(hwnd_, nCmdShow);
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     UpdateWindow(hwnd_);
     SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
