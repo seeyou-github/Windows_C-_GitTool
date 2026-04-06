@@ -16,6 +16,7 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <unordered_map>
 
 namespace {
 
@@ -1057,13 +1058,18 @@ std::vector<std::wstring> SplitTextLines(const std::wstring& text) {
     return lines;
 }
 
-std::vector<std::pair<int, int>> ComputeLineMatches(
+void AppendLcsMatchesRange(
     const std::vector<std::wstring>& beforeLines,
-    const std::vector<std::wstring>& afterLines) {
-    const size_t beforeCount = beforeLines.size();
-    const size_t afterCount = afterLines.size();
-    if (beforeCount == 0 || afterCount == 0 || (beforeCount * afterCount) > 400000) {
-        return {};
+    int beforeStart,
+    int beforeEnd,
+    const std::vector<std::wstring>& afterLines,
+    int afterStart,
+    int afterEnd,
+    std::vector<std::pair<int, int>>& matches) {
+    const size_t beforeCount = static_cast<size_t>(std::max(0, beforeEnd - beforeStart));
+    const size_t afterCount = static_cast<size_t>(std::max(0, afterEnd - afterStart));
+    if (beforeCount == 0 || afterCount == 0) {
+        return;
     }
 
     std::vector<int> table((beforeCount + 1) * (afterCount + 1), 0);
@@ -1073,8 +1079,10 @@ std::vector<std::pair<int, int>> ComputeLineMatches(
 
     for (int i = static_cast<int>(beforeCount) - 1; i >= 0; --i) {
         for (int j = static_cast<int>(afterCount) - 1; j >= 0; --j) {
-            if (beforeLines[static_cast<size_t>(i)] == afterLines[static_cast<size_t>(j)]) {
-                at(static_cast<size_t>(i), static_cast<size_t>(j)) = 1 + at(static_cast<size_t>(i + 1), static_cast<size_t>(j + 1));
+            if (beforeLines[static_cast<size_t>(beforeStart + i)] ==
+                afterLines[static_cast<size_t>(afterStart + j)]) {
+                at(static_cast<size_t>(i), static_cast<size_t>(j)) =
+                    1 + at(static_cast<size_t>(i + 1), static_cast<size_t>(j + 1));
             } else {
                 at(static_cast<size_t>(i), static_cast<size_t>(j)) = std::max(
                     at(static_cast<size_t>(i + 1), static_cast<size_t>(j)),
@@ -1083,12 +1091,14 @@ std::vector<std::pair<int, int>> ComputeLineMatches(
         }
     }
 
-    std::vector<std::pair<int, int>> matches;
     size_t i = 0;
     size_t j = 0;
     while (i < beforeCount && j < afterCount) {
-        if (beforeLines[i] == afterLines[j]) {
-            matches.emplace_back(static_cast<int>(i), static_cast<int>(j));
+        if (beforeLines[static_cast<size_t>(beforeStart) + i] ==
+            afterLines[static_cast<size_t>(afterStart) + j]) {
+            matches.emplace_back(
+                beforeStart + static_cast<int>(i),
+                afterStart + static_cast<int>(j));
             ++i;
             ++j;
         } else if (at(i + 1, j) >= at(i, j + 1)) {
@@ -1097,6 +1107,168 @@ std::vector<std::pair<int, int>> ComputeLineMatches(
             ++j;
         }
     }
+}
+
+std::vector<std::pair<int, int>> BuildUniqueAnchors(
+    const std::vector<std::wstring>& beforeLines,
+    int beforeStart,
+    int beforeEnd,
+    const std::vector<std::wstring>& afterLines,
+    int afterStart,
+    int afterEnd) {
+    struct LineInfo {
+        int count = 0;
+        int index = -1;
+    };
+
+    std::unordered_map<std::wstring, LineInfo> beforeMap;
+    std::unordered_map<std::wstring, LineInfo> afterMap;
+    beforeMap.reserve(static_cast<size_t>(std::max(0, beforeEnd - beforeStart)));
+    afterMap.reserve(static_cast<size_t>(std::max(0, afterEnd - afterStart)));
+
+    for (int i = beforeStart; i < beforeEnd; ++i) {
+        auto& info = beforeMap[beforeLines[static_cast<size_t>(i)]];
+        if (info.count == 0) {
+            info.index = i;
+        }
+        ++info.count;
+    }
+    for (int i = afterStart; i < afterEnd; ++i) {
+        auto& info = afterMap[afterLines[static_cast<size_t>(i)]];
+        if (info.count == 0) {
+            info.index = i;
+        }
+        ++info.count;
+    }
+
+    std::vector<std::pair<int, int>> candidates;
+    candidates.reserve(beforeMap.size());
+    for (const auto& entry : beforeMap) {
+        if (entry.second.count != 1) {
+            continue;
+        }
+        const auto afterIt = afterMap.find(entry.first);
+        if (afterIt == afterMap.end() || afterIt->second.count != 1) {
+            continue;
+        }
+        candidates.emplace_back(entry.second.index, afterIt->second.index);
+    }
+
+    if (candidates.empty()) {
+        return {};
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+
+    std::vector<int> tails;
+    std::vector<int> tailIndices;
+    std::vector<int> previous(candidates.size(), -1);
+    tails.reserve(candidates.size());
+    tailIndices.reserve(candidates.size());
+
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const int afterIndex = candidates[i].second;
+        const auto it = std::lower_bound(tails.begin(), tails.end(), afterIndex);
+        const int position = static_cast<int>(it - tails.begin());
+        if (it == tails.end()) {
+            tails.push_back(afterIndex);
+            tailIndices.push_back(static_cast<int>(i));
+        } else {
+            *it = afterIndex;
+            tailIndices[static_cast<size_t>(position)] = static_cast<int>(i);
+        }
+        if (position > 0) {
+            previous[i] = tailIndices[static_cast<size_t>(position - 1)];
+        }
+    }
+
+    std::vector<std::pair<int, int>> anchors;
+    for (int current = tailIndices.empty() ? -1 : tailIndices.back();
+         current >= 0;
+         current = previous[static_cast<size_t>(current)]) {
+        anchors.push_back(candidates[static_cast<size_t>(current)]);
+    }
+    std::reverse(anchors.begin(), anchors.end());
+    return anchors;
+}
+
+void ComputeLineMatchesRecursive(
+    const std::vector<std::wstring>& beforeLines,
+    int beforeStart,
+    int beforeEnd,
+    const std::vector<std::wstring>& afterLines,
+    int afterStart,
+    int afterEnd,
+    std::vector<std::pair<int, int>>& matches) {
+    while (beforeStart < beforeEnd &&
+           afterStart < afterEnd &&
+           beforeLines[static_cast<size_t>(beforeStart)] == afterLines[static_cast<size_t>(afterStart)]) {
+        matches.emplace_back(beforeStart, afterStart);
+        ++beforeStart;
+        ++afterStart;
+    }
+
+    int suffixLength = 0;
+    while ((beforeStart + suffixLength) < beforeEnd &&
+           (afterStart + suffixLength) < afterEnd &&
+           beforeLines[static_cast<size_t>(beforeEnd - suffixLength - 1)] ==
+               afterLines[static_cast<size_t>(afterEnd - suffixLength - 1)]) {
+        ++suffixLength;
+    }
+
+    beforeEnd -= suffixLength;
+    afterEnd -= suffixLength;
+
+    const size_t beforeCount = static_cast<size_t>(std::max(0, beforeEnd - beforeStart));
+    const size_t afterCount = static_cast<size_t>(std::max(0, afterEnd - afterStart));
+    if (beforeCount == 0 || afterCount == 0) {
+        for (int i = 0; i < suffixLength; ++i) {
+            matches.emplace_back(beforeEnd + i, afterEnd + i);
+        }
+        return;
+    }
+
+    if ((beforeCount * afterCount) <= 400000) {
+        AppendLcsMatchesRange(beforeLines, beforeStart, beforeEnd, afterLines, afterStart, afterEnd, matches);
+    } else {
+        const std::vector<std::pair<int, int>> anchors = BuildUniqueAnchors(
+            beforeLines, beforeStart, beforeEnd, afterLines, afterStart, afterEnd);
+        if (!anchors.empty()) {
+            int currentBefore = beforeStart;
+            int currentAfter = afterStart;
+            for (const auto& anchor : anchors) {
+                ComputeLineMatchesRecursive(
+                    beforeLines, currentBefore, anchor.first,
+                    afterLines, currentAfter, anchor.second,
+                    matches);
+                matches.push_back(anchor);
+                currentBefore = anchor.first + 1;
+                currentAfter = anchor.second + 1;
+            }
+            ComputeLineMatchesRecursive(
+                beforeLines, currentBefore, beforeEnd,
+                afterLines, currentAfter, afterEnd,
+                matches);
+        }
+    }
+
+    for (int i = 0; i < suffixLength; ++i) {
+        matches.emplace_back(beforeEnd + i, afterEnd + i);
+    }
+}
+
+std::vector<std::pair<int, int>> ComputeLineMatches(
+    const std::vector<std::wstring>& beforeLines,
+    const std::vector<std::wstring>& afterLines) {
+    std::vector<std::pair<int, int>> matches;
+    if (beforeLines.empty() || afterLines.empty()) {
+        return matches;
+    }
+
+    ComputeLineMatchesRecursive(
+        beforeLines, 0, static_cast<int>(beforeLines.size()),
+        afterLines, 0, static_cast<int>(afterLines.size()),
+        matches);
     return matches;
 }
 
