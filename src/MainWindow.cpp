@@ -34,6 +34,9 @@ constexpr UINT WM_APP_COMMITS_REFRESH_DONE = WM_APP + 2;
 constexpr UINT WM_APP_GIT_COMMAND_OUTPUT = WM_APP + 3;
 constexpr UINT WM_APP_INITIAL_REFRESH = WM_APP + 4;
 constexpr UINT WM_APP_INITIALIZE_UI = WM_APP + 5;
+constexpr UINT WM_APP_RENDER_DIFF_CONTENT = WM_APP + 6;
+constexpr UINT WM_APP_DIFF_ROWS_READY = WM_APP + 7;
+constexpr UINT WM_APP_DIFF_CONTENT_READY = WM_APP + 8;
 constexpr UINT_PTR kLogFlushTimerId = 1;
 constexpr int kToolbarHeight = 58;
 constexpr int kPadding = 12;
@@ -52,24 +55,6 @@ constexpr COLORREF kMenuText = RGB(40, 40, 40);
 constexpr COLORREF kLogDefaultText = RGB(170, 176, 184);
 std::unique_ptr<Gdiplus::Bitmap> g_githubBitmap;
 HICON g_githubIcon = nullptr;
-ULONGLONG g_startupLogBaseTick = GetTickCount64();
-
-std::wstring StartupLogPath() {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring fullPath = path;
-    const size_t pos = fullPath.find_last_of(L"\\/");
-    const std::wstring dir = pos == std::wstring::npos ? L"." : fullPath.substr(0, pos);
-    return dir + L"\\startup_debug.log";
-}
-
-void AppendStartupLog(const wchar_t* message) {
-    std::wofstream output(StartupLogPath().c_str(), std::ios::app);
-    if (!output.is_open()) {
-        return;
-    }
-    output << L"[" << (GetTickCount64() - g_startupLogBaseTick) << L" ms] " << (message ? message : L"") << L"\r\n";
-}
 
 void PaintMainWindowBackground(HDC dc, const RECT& rect, bool paintedStatusVisible,
                                const RECT& statusTextRect, const std::wstring& paintedStatusText,
@@ -644,10 +629,20 @@ struct AsyncCommitRefreshState {
     std::vector<CommitInfo> commits;
 };
 
+struct DiffDisplayLine;
+struct DiffRenderResult;
+
 struct DiffContentWindowState {
     std::wstring title;
     std::wstring beforeTitle;
     std::wstring afterTitle;
+    std::wstring repoPath;
+    std::wstring beforeRevision;
+    std::wstring afterRevision;
+    std::wstring beforePath;
+    std::wstring afterPath;
+    std::wstring cacheCommitHash;
+    std::wstring cacheDiffKey;
     std::wstring beforeContent;
     std::wstring afterContent;
     HWND beforeLabel = nullptr;
@@ -659,8 +654,19 @@ struct DiffContentWindowState {
     HFONT codeFont = nullptr;
     WNDPROC beforeEditProc = nullptr;
     WNDPROC afterEditProc = nullptr;
+    CacheDatabase* cacheDatabase = nullptr;
+    std::vector<DiffDisplayLine> allRows;
+    std::vector<DiffDisplayLine> hiddenRows;
     bool hideSame = false;
     bool syncingScroll = false;
+    bool afterUsesWorkingTree = false;
+    bool contentLoaded = false;
+    bool allRowsReady = false;
+    bool hiddenRowsReady = false;
+    unsigned long long loadToken = 0;
+    unsigned long long renderToken = 0;
+    size_t renderIndex = 0;
+    DiffRenderResult* activeRender = nullptr;
 };
 
 struct CommitDetailWindowState {
@@ -1007,6 +1013,56 @@ void ShowDiffWindow(
     diffState->afterTitle = L"After";
     diffState->beforeContent = beforeContent.empty() ? L"(empty)" : beforeContent;
     diffState->afterContent = afterContent.empty() ? L"(empty)" : afterContent;
+    diffState->contentLoaded = true;
+    diffState->uiFont = uiFont;
+    diffState->codeFont = codeFont != nullptr ? codeFont : uiFont;
+
+    RECT rc{};
+    if (owner != nullptr && IsWindow(owner)) {
+        GetWindowRect(owner, &rc);
+    } else {
+        rc = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    }
+    const int width = ((rc.right - rc.left) * 9) / 10;
+    const int height = ((rc.bottom - rc.top) * 9) / 10;
+    const int x = rc.left + ((rc.right - rc.left) - width) / 2;
+    const int y = rc.top + ((rc.bottom - rc.top) - height) / 2;
+    HWND diffWindow = CreateWindowExW(
+        0, kDiffContentWindowClass, diffState->title.c_str(),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZEBOX | WS_THICKFRAME,
+        x, y, width, height, nullptr, nullptr, GetModuleHandleW(nullptr), diffState);
+    if (diffWindow == nullptr) {
+        delete diffState;
+    }
+}
+
+void ShowDiffWindowAsync(
+    HWND owner,
+    const std::wstring& title,
+    const std::wstring& repoPath,
+    const std::wstring& beforeRevision,
+    const std::wstring& beforePath,
+    const std::wstring& afterRevision,
+    const std::wstring& afterPath,
+    bool afterUsesWorkingTree,
+    HFONT uiFont,
+    HFONT codeFont,
+    CacheDatabase* cacheDatabase = nullptr,
+    const std::wstring& cacheCommitHash = L"",
+    const std::wstring& cacheDiffKey = L"") {
+    auto* diffState = new DiffContentWindowState();
+    diffState->title = title;
+    diffState->beforeTitle = L"Before";
+    diffState->afterTitle = L"After";
+    diffState->repoPath = repoPath;
+    diffState->beforeRevision = beforeRevision;
+    diffState->afterRevision = afterRevision;
+    diffState->beforePath = beforePath;
+    diffState->afterPath = afterPath;
+    diffState->afterUsesWorkingTree = afterUsesWorkingTree;
+    diffState->cacheDatabase = cacheDatabase;
+    diffState->cacheCommitHash = cacheCommitHash;
+    diffState->cacheDiffKey = cacheDiffKey;
     diffState->uiFont = uiFont;
     diffState->codeFont = codeFont != nullptr ? codeFont : uiFont;
 
@@ -1396,6 +1452,40 @@ std::wstring FormatDiffDisplayLine(int lineNumber, const std::wstring& text, boo
     return std::wstring(buffer) + text;
 }
 
+struct DiffRenderRequest {
+    HWND hwnd = nullptr;
+    unsigned long long token = 0;
+    std::wstring beforeContent;
+    std::wstring afterContent;
+    ULONGLONG startTick = 0;
+};
+
+struct DiffRenderResult {
+    unsigned long long token = 0;
+    std::vector<DiffDisplayLine> rows;
+    int preferredTopLine = 0;
+    ULONGLONG startTick = 0;
+};
+
+struct DiffContentLoadRequest {
+    HWND hwnd = nullptr;
+    unsigned long long token = 0;
+    std::wstring repoPath;
+    std::wstring beforeRevision;
+    std::wstring afterRevision;
+    std::wstring beforePath;
+    std::wstring afterPath;
+    bool afterUsesWorkingTree = false;
+    ULONGLONG startTick = 0;
+};
+
+struct DiffContentLoadResult {
+    unsigned long long token = 0;
+    std::wstring beforeContent;
+    std::wstring afterContent;
+    ULONGLONG startTick = 0;
+};
+
 void AppendRichEditLine(HWND edit, const std::wstring& text, COLORREF textColor, COLORREF backgroundColor) {
     CHARRANGE range{-1, -1};
     SendMessageW(edit, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
@@ -1409,17 +1499,205 @@ void AppendRichEditLine(HWND edit, const std::wstring& text, COLORREF textColor,
     SendMessageW(edit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
 }
 
+void ScrollDiffEditorToLine(HWND edit, int lineIndex) {
+    if (edit == nullptr) {
+        return;
+    }
+
+    SendMessageW(edit, EM_SETSEL, 0, 0);
+    if (lineIndex > 0) {
+        SendMessageW(edit, EM_LINESCROLL, 0, lineIndex);
+    }
+}
+
+DWORD WINAPI AsyncDiffRenderThread(LPVOID param) {
+    std::unique_ptr<DiffRenderRequest> request(reinterpret_cast<DiffRenderRequest*>(param));
+    if (request == nullptr) {
+        return 0;
+    }
+
+    auto* result = new DiffRenderResult();
+    result->token = request->token;
+    result->startTick = request->startTick;
+    result->rows = BuildDiffDisplayLines(request->beforeContent, request->afterContent, false);
+    result->preferredTopLine = 0;
+
+    if (!PostMessageW(request->hwnd, WM_APP_DIFF_ROWS_READY, 0, reinterpret_cast<LPARAM>(result))) {
+        delete result;
+    }
+    return 0;
+}
+
+DWORD WINAPI AsyncDiffContentLoadThread(LPVOID param) {
+    std::unique_ptr<DiffContentLoadRequest> request(reinterpret_cast<DiffContentLoadRequest*>(param));
+    if (request == nullptr) {
+        return 0;
+    }
+
+    auto* result = new DiffContentLoadResult();
+    result->token = request->token;
+    result->startTick = request->startTick;
+    if (!request->beforeRevision.empty() && !request->beforePath.empty()) {
+        result->beforeContent = GitRunner::GetFileContentAtRevision(
+            request->repoPath, request->beforeRevision, request->beforePath);
+    }
+    if (!request->afterPath.empty()) {
+        if (request->afterUsesWorkingTree) {
+            const std::filesystem::path repoRootPath(request->repoPath);
+            result->afterContent = GitRunner::ReadWorkingTreeFile(
+                (repoRootPath / std::filesystem::path(request->afterPath)).wstring());
+        } else if (!request->afterRevision.empty()) {
+            result->afterContent = GitRunner::GetFileContentAtRevision(
+                request->repoPath, request->afterRevision, request->afterPath);
+        }
+    }
+
+    if (!PostMessageW(request->hwnd, WM_APP_DIFF_CONTENT_READY, 0, reinterpret_cast<LPARAM>(result))) {
+        delete result;
+    }
+    return 0;
+}
+
+std::vector<DiffDisplayLine> FilterDiffDisplayLines(const std::vector<DiffDisplayLine>& rows) {
+    std::vector<DiffDisplayLine> filtered;
+    size_t index = 0;
+    while (index < rows.size()) {
+        if (!rows[index].same) {
+            filtered.push_back(rows[index]);
+            ++index;
+            continue;
+        }
+
+        size_t end = index;
+        while (end < rows.size() && rows[end].same) {
+            ++end;
+        }
+
+        DiffDisplayLine placeholder;
+        placeholder.placeholder = true;
+        placeholder.same = true;
+        placeholder.beforeText = L"... same lines hidden ...";
+        placeholder.afterText = L"... same lines hidden ...";
+        placeholder.beforeTextColor = RGB(138, 145, 156);
+        placeholder.afterTextColor = RGB(138, 145, 156);
+        placeholder.beforeBackground = DarkTheme::PanelBackground();
+        placeholder.afterBackground = DarkTheme::PanelBackground();
+        filtered.push_back(placeholder);
+        index = end;
+    }
+    return filtered;
+}
+
+void StartAsyncDiffContentLoad(HWND hwnd, DiffContentWindowState* state) {
+    if (hwnd == nullptr || state == nullptr || state->beforeEdit == nullptr || state->afterEdit == nullptr) {
+        return;
+    }
+
+    ++state->loadToken;
+    state->contentLoaded = false;
+    state->allRowsReady = false;
+    state->hiddenRowsReady = false;
+    state->allRows.clear();
+    state->hiddenRows.clear();
+    state->renderIndex = 0;
+    if (state->activeRender != nullptr) {
+        delete state->activeRender;
+        state->activeRender = nullptr;
+    }
+
+    SendMessageW(state->beforeEdit, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(state->afterEdit, WM_SETREDRAW, TRUE, 0);
+    SetWindowTextW(state->beforeEdit, L"Loading diff...");
+    SetWindowTextW(state->afterEdit, L"Loading diff...");
+    InvalidateRect(state->beforeEdit, nullptr, TRUE);
+    InvalidateRect(state->afterEdit, nullptr, TRUE);
+
+    auto* request = new DiffContentLoadRequest();
+    request->hwnd = hwnd;
+    request->token = state->loadToken;
+    request->repoPath = state->repoPath;
+    request->beforeRevision = state->beforeRevision;
+    request->afterRevision = state->afterRevision;
+    request->beforePath = state->beforePath;
+    request->afterPath = state->afterPath;
+    request->afterUsesWorkingTree = state->afterUsesWorkingTree;
+    request->startTick = GetTickCount64();
+
+    const HANDLE thread = CreateThread(nullptr, 0, AsyncDiffContentLoadThread, request, 0, nullptr);
+    if (thread == nullptr) {
+        delete request;
+        SetWindowTextW(state->beforeEdit, L"Failed to load diff.");
+        SetWindowTextW(state->afterEdit, L"Failed to load diff.");
+        return;
+    }
+    CloseHandle(thread);
+}
+
+void StartAsyncDiffRender(HWND hwnd, DiffContentWindowState* state) {
+    if (hwnd == nullptr || state == nullptr || state->beforeEdit == nullptr || state->afterEdit == nullptr) {
+        return;
+    }
+
+    ++state->renderToken;
+    state->renderIndex = 0;
+    if (state->activeRender != nullptr) {
+        delete state->activeRender;
+        state->activeRender = nullptr;
+    }
+
+    SendMessageW(state->beforeEdit, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(state->afterEdit, WM_SETREDRAW, TRUE, 0);
+    SetWindowTextW(state->beforeEdit, L"Loading diff...");
+    SetWindowTextW(state->afterEdit, L"Loading diff...");
+    InvalidateRect(state->beforeEdit, nullptr, TRUE);
+    InvalidateRect(state->afterEdit, nullptr, TRUE);
+
+    auto* request = new DiffRenderRequest();
+    request->hwnd = hwnd;
+    request->token = state->renderToken;
+    request->beforeContent = state->beforeContent;
+    request->afterContent = state->afterContent;
+    request->startTick = GetTickCount64();
+
+    const HANDLE thread = CreateThread(nullptr, 0, AsyncDiffRenderThread, request, 0, nullptr);
+    if (thread == nullptr) {
+        delete request;
+        SetWindowTextW(state->beforeEdit, L"Failed to start diff render.");
+        SetWindowTextW(state->afterEdit, L"Failed to start diff render.");
+        return;
+    }
+    CloseHandle(thread);
+}
+
+const std::vector<DiffDisplayLine>* GetVisibleDiffRows(DiffContentWindowState* state) {
+    if (state == nullptr || !state->allRowsReady) {
+        return nullptr;
+    }
+    if (!state->hideSame) {
+        return &state->allRows;
+    }
+    if (!state->hiddenRowsReady) {
+        state->hiddenRows = FilterDiffDisplayLines(state->allRows);
+        state->hiddenRowsReady = true;
+    }
+    return &state->hiddenRows;
+}
+
 void RenderDiffEditors(DiffContentWindowState* state) {
     if (state == nullptr || state->beforeEdit == nullptr || state->afterEdit == nullptr) {
         return;
     }
 
-    const std::vector<DiffDisplayLine> rows = BuildDiffDisplayLines(
-        state->beforeContent, state->afterContent, state->hideSame);
+    const std::vector<DiffDisplayLine>* rowsPtr = GetVisibleDiffRows(state);
+    if (rowsPtr == nullptr) {
+        return;
+    }
 
-    SetWindowTextW(state->beforeEdit, L"");
-    SetWindowTextW(state->afterEdit, L"");
-    for (const auto& row : rows) {
+    constexpr size_t kDiffRenderChunkSize = 200;
+    const std::vector<DiffDisplayLine>& rows = *rowsPtr;
+    const size_t endIndex = std::min(state->renderIndex + kDiffRenderChunkSize, rows.size());
+    for (size_t i = state->renderIndex; i < endIndex; ++i) {
+        const auto& row = rows[i];
         AppendRichEditLine(
             state->beforeEdit,
             FormatDiffDisplayLine(row.beforeLineNumber, row.beforeText, row.placeholder) + L"\r\n",
@@ -1431,9 +1709,20 @@ void RenderDiffEditors(DiffContentWindowState* state) {
             row.afterTextColor,
             row.afterBackground);
     }
+    state->renderIndex = endIndex;
 
-    SendMessageW(state->beforeEdit, WM_VSCROLL, MAKEWPARAM(SB_TOP, 0), 0);
-    SendMessageW(state->afterEdit, WM_VSCROLL, MAKEWPARAM(SB_TOP, 0), 0);
+    if (state->renderIndex < rows.size()) {
+        PostMessageW(GetParent(state->beforeEdit), WM_APP_RENDER_DIFF_CONTENT, 0, 0);
+        return;
+    }
+
+    ScrollDiffEditorToLine(state->beforeEdit, 0);
+    ScrollDiffEditorToLine(state->afterEdit, 0);
+    SendMessageW(state->beforeEdit, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(state->afterEdit, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(state->beforeEdit, nullptr, TRUE);
+    InvalidateRect(state->afterEdit, nullptr, TRUE);
+
 }
 
 void SyncDiffEditors(DiffContentWindowState* state, HWND sourceEdit) {
@@ -1592,12 +1881,12 @@ LRESULT CALLBACK DiffContentWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4201), cs->hInstance, nullptr);
         state->beforeEdit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->beforeContent.c_str(),
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
                 ES_NOHIDESEL | WS_VSCROLL | WS_HSCROLL,
             0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
         state->afterEdit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->afterContent.c_str(),
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
                 ES_NOHIDESEL | WS_VSCROLL | WS_HSCROLL,
             0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
@@ -1622,7 +1911,11 @@ LRESULT CALLBACK DiffContentWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
             SetWindowLongPtrW(state->beforeEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DiffEditProc)));
         state->afterEditProc = reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(state->afterEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DiffEditProc)));
-        RenderDiffEditors(state);
+        if (state->contentLoaded) {
+            StartAsyncDiffRender(hwnd, state);
+        } else {
+            StartAsyncDiffContentLoad(hwnd, state);
+        }
         return 0;
     }
     case WM_SIZE:
@@ -1646,6 +1939,59 @@ LRESULT CALLBACK DiffContentWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
     case WM_COMMAND:
         if (state != nullptr && LOWORD(wParam) == 4201) {
             state->hideSame = (SendMessageW(state->toggleButton, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (state->allRowsReady) {
+                state->renderIndex = 0;
+                SendMessageW(state->beforeEdit, WM_SETREDRAW, FALSE, 0);
+                SendMessageW(state->afterEdit, WM_SETREDRAW, FALSE, 0);
+                SetWindowTextW(state->beforeEdit, L"");
+                SetWindowTextW(state->afterEdit, L"");
+                PostMessageW(hwnd, WM_APP_RENDER_DIFF_CONTENT, 0, 0);
+            }
+            return 0;
+        }
+        break;
+    case WM_APP_DIFF_CONTENT_READY:
+        if (state != nullptr) {
+            std::unique_ptr<DiffContentLoadResult> result(reinterpret_cast<DiffContentLoadResult*>(lParam));
+            if (result != nullptr && result->token == state->loadToken) {
+                state->beforeContent = result->beforeContent.empty() ? L"(empty)" : result->beforeContent;
+                state->afterContent = result->afterContent.empty() ? L"(empty)" : result->afterContent;
+                state->contentLoaded = true;
+                if (state->cacheDatabase != nullptr &&
+                    !state->cacheCommitHash.empty() &&
+                    !state->cacheDiffKey.empty()) {
+                    state->cacheDatabase->PutDiffContent(
+                        state->repoPath,
+                        state->cacheCommitHash,
+                        state->cacheDiffKey,
+                        state->beforeContent,
+                        state->afterContent);
+                }
+                StartAsyncDiffRender(hwnd, state);
+            }
+            return 0;
+        }
+        break;
+    case WM_APP_DIFF_ROWS_READY:
+        if (state != nullptr) {
+            std::unique_ptr<DiffRenderResult> result(reinterpret_cast<DiffRenderResult*>(lParam));
+            if (result != nullptr && result->token == state->renderToken) {
+                state->allRows = std::move(result->rows);
+                state->allRowsReady = true;
+                state->hiddenRows.clear();
+                state->hiddenRowsReady = false;
+                state->renderIndex = 0;
+                SendMessageW(state->beforeEdit, WM_SETREDRAW, FALSE, 0);
+                SendMessageW(state->afterEdit, WM_SETREDRAW, FALSE, 0);
+                SetWindowTextW(state->beforeEdit, L"");
+                SetWindowTextW(state->afterEdit, L"");
+                PostMessageW(hwnd, WM_APP_RENDER_DIFF_CONTENT, 0, 0);
+            }
+            return 0;
+        }
+        break;
+    case WM_APP_RENDER_DIFF_CONTENT:
+        if (state != nullptr) {
             RenderDiffEditors(state);
             return 0;
         }
@@ -1679,6 +2025,10 @@ LRESULT CALLBACK DiffContentWindowProc(HWND hwnd, UINT message, WPARAM wParam, L
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             SetForegroundWindow(owner);
             SetActiveWindow(owner);
+        }
+        if (state != nullptr && state->activeRender != nullptr) {
+            delete state->activeRender;
+            state->activeRender = nullptr;
         }
         delete state;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1815,24 +2165,22 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
                 const int index = ListView_GetNextItem(state->fileList, -1, LVNI_SELECTED);
                 if (index >= 0 && index < static_cast<int>(state->diffs.size())) {
                     const CommitFileDiff& diff = state->diffs[index];
-                    std::wstring beforeContent;
-                    std::wstring afterContent;
-                    const std::filesystem::path repoRootPath(state->repoPath);
+                    const std::wstring beforePath = diff.status == L'A'
+                        ? L""
+                        : (diff.status == L'R' ? diff.oldPath : diff.patchPath);
+                    const std::wstring afterPath = diff.status == L'D'
+                        ? L""
+                        : (diff.status == L'R' ? diff.newPath : diff.patchPath);
 
-                    if (diff.status != L'A') {
-                        const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
-                        beforeContent = GitRunner::GetFileContentAtRevision(state->repoPath, L"HEAD", beforePath);
-                    }
-                    if (diff.status != L'D') {
-                        const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
-                        afterContent = GitRunner::ReadWorkingTreeFile((repoRootPath / std::filesystem::path(afterPath)).wstring());
-                    }
-
-                    ShowDiffWindow(
+                    ShowDiffWindowAsync(
                         hwnd,
                         L"Diff - " + BuildCommitFileLabel(diff),
-                        beforeContent,
-                        afterContent,
+                        state->repoPath,
+                        beforePath.empty() ? L"" : L"HEAD",
+                        beforePath,
+                        L"",
+                        afterPath,
+                        true,
                         state->uiFont,
                         state->codeFont);
                 }
@@ -2455,31 +2803,40 @@ LRESULT CALLBACK CommitDetailWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
                     std::wstring beforeContent;
                     std::wstring afterContent;
                     const std::wstring diffKey = diff.path;
+                    const bool hasCachedContent = state->cacheDatabase->GetDiffContent(
+                        state->repoPath, state->commitHash, diffKey, &beforeContent, &afterContent);
 
-                    if (!state->cacheDatabase->GetDiffContent(
-                            state->repoPath, state->commitHash, diffKey, &beforeContent, &afterContent)) {
+                    if (hasCachedContent) {
+                        ShowDiffWindow(
+                            hwnd,
+                            L"Diff - " + BuildCommitFileLabel(diff),
+                            beforeContent,
+                            afterContent,
+                            state->uiFont,
+                            state->codeFont);
+                    } else {
                         const std::wstring parentRevision = state->commitHash + L"^";
-                        if (diff.status != L'A') {
-                            const std::wstring beforePath = diff.status == L'R' ? diff.oldPath : diff.patchPath;
-                            beforeContent = GitRunner::GetFileContentAtRevision(
-                                state->repoPath, parentRevision, beforePath);
-                        }
-                        if (diff.status != L'D') {
-                            const std::wstring afterPath = diff.status == L'R' ? diff.newPath : diff.patchPath;
-                            afterContent = GitRunner::GetFileContentAtRevision(
-                                state->repoPath, state->commitHash, afterPath);
-                        }
-                        state->cacheDatabase->PutDiffContent(
-                            state->repoPath, state->commitHash, diffKey, beforeContent, afterContent);
+                        const std::wstring beforePath = diff.status == L'A'
+                            ? L""
+                            : (diff.status == L'R' ? diff.oldPath : diff.patchPath);
+                        const std::wstring afterPath = diff.status == L'D'
+                            ? L""
+                            : (diff.status == L'R' ? diff.newPath : diff.patchPath);
+                        ShowDiffWindowAsync(
+                            hwnd,
+                            L"Diff - " + BuildCommitFileLabel(diff),
+                            state->repoPath,
+                            beforePath.empty() ? L"" : parentRevision,
+                            beforePath,
+                            afterPath.empty() ? L"" : state->commitHash,
+                            afterPath,
+                            false,
+                            state->uiFont,
+                            state->codeFont,
+                            state->cacheDatabase,
+                            state->commitHash,
+                            diffKey);
                     }
-
-                    ShowDiffWindow(
-                        hwnd,
-                        L"Diff - " + BuildCommitFileLabel(diff),
-                        beforeContent,
-                        afterContent,
-                        state->uiFont,
-                        state->codeFont);
                 }
                 return 0;
             }
@@ -2750,18 +3107,10 @@ std::vector<BYTE> BuildPromptDialogTemplate(bool multiline) {
 MainWindow::MainWindow() = default;
 
 bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
-    g_startupLogBaseTick = GetTickCount64();
-    std::wofstream resetLog(StartupLogPath().c_str(), std::ios::trunc);
-    if (resetLog.is_open()) {
-        resetLog << L"GitVisualTool startup log\r\n";
-    }
-    AppendStartupLog(L"MainWindow::Create begin");
     instance_ = instance;
     projectStore_.Load();
-    AppendStartupLog(L"projectStore_.Load finished");
     cacheDatabase_.SetPath(GetExecutableDirectory() + L"\\GitVisualTool.cache.db");
     cacheDatabase_.Load();
-    AppendStartupLog(L"cacheDatabase_.Load finished");
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -2865,10 +3214,8 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
         this);
 
     if (hwnd_ == nullptr) {
-        AppendStartupLog(L"CreateWindowExW failed");
         return false;
     }
-    AppendStartupLog(L"CreateWindowExW finished");
 
     HICON largeIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
     HICON smallIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
@@ -2883,7 +3230,6 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     ShowWindow(hwnd_, nCmdShow);
     UpdateWindow(hwnd_);
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
-    AppendStartupLog(L"initial ShowWindow/UpdateWindow/RedrawWindow finished");
     return true;
 }
 
@@ -3100,38 +3446,25 @@ DWORD WINAPI MainWindow::AsyncCommitRefreshThread(LPVOID param) {
 LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE:
-        AppendStartupLog(L"WM_CREATE begin");
         DarkTheme::ApplyTitleBar(hwnd_);
-        AppendStartupLog(L"ApplyTitleBar finished");
         PostMessageW(hwnd_, WM_APP_INITIALIZE_UI, 0, 0);
-        AppendStartupLog(L"WM_APP_INITIALIZE_UI posted");
         return 0;
     case WM_APP_INITIALIZE_UI:
-        AppendStartupLog(L"WM_APP_INITIALIZE_UI begin");
         CreateControls();
-        AppendStartupLog(L"CreateControls finished");
         ApplyFonts();
-        AppendStartupLog(L"ApplyFonts finished");
         {
             RECT rect{};
             GetClientRect(hwnd_, &rect);
             LayoutControls(rect.right - rect.left, rect.bottom - rect.top);
         }
-        AppendStartupLog(L"LayoutControls finished");
         ClearLog();
         LoadProjectsIntoList();
-        AppendStartupLog(L"LoadProjectsIntoList finished");
         ShowControls();
-        AppendStartupLog(L"ShowControls finished");
         FinalizeInitialShow();
-        AppendStartupLog(L"FinalizeInitialShow finished");
         PostMessageW(hwnd_, WM_APP_INITIAL_REFRESH, 0, 0);
-        AppendStartupLog(L"WM_APP_INITIAL_REFRESH posted");
         return 0;
     case WM_APP_INITIAL_REFRESH:
-        AppendStartupLog(L"WM_APP_INITIAL_REFRESH begin");
         RefreshCurrentRepository();
-        AppendStartupLog(L"WM_APP_INITIAL_REFRESH finished");
         return 0;
     case WM_SIZE:
         if (addFolderButton_ != nullptr) {
@@ -3464,11 +3797,6 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     case WM_ERASEBKGND:
     {
-        static bool logged = false;
-        if (!logged) {
-            AppendStartupLog(L"first WM_ERASEBKGND");
-            logged = true;
-        }
         HDC dc = reinterpret_cast<HDC>(wParam);
         RECT rect{};
         GetClientRect(hwnd_, &rect);
@@ -3476,11 +3804,6 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return 1;
     }
     case WM_PAINT: {
-        static bool logged = false;
-        if (!logged) {
-            AppendStartupLog(L"first WM_PAINT");
-            logged = true;
-        }
         PAINTSTRUCT ps{};
         HDC dc = BeginPaint(hwnd_, &ps);
         RECT rect{};
