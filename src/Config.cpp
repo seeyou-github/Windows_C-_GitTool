@@ -65,13 +65,31 @@ bool WriteAllText(const std::wstring& path, const std::wstring& content) {
     return output.good();
 }
 
+const wchar_t* ToConfigSortMode(ProjectSortMode mode) {
+    switch (mode) {
+    case ProjectSortMode::Name:
+        return L"name";
+    case ProjectSortMode::AddedTime:
+    default:
+        return L"added";
+    }
+}
+
+ProjectSortMode ParseConfigSortMode(const std::wstring& value) {
+    if (value == L"name") {
+        return ProjectSortMode::Name;
+    }
+    return ProjectSortMode::AddedTime;
+}
+
 std::wstring BuildConfigText(const AppConfig& config) {
     std::wstringstream stream;
     stream << L"[Window]\n";
     stream << L"Width=" << config.windowWidth << L"\n";
     stream << L"Height=" << config.windowHeight << L"\n\n";
     stream << L"[General]\n";
-    stream << L"LastProject=" << config.lastProject << L"\n\n";
+    stream << L"LastProject=" << config.lastProject << L"\n";
+    stream << L"ProjectSort=" << ToConfigSortMode(config.projectSortMode) << L"\n\n";
     stream << L"[Projects]\n";
     stream << L"Count=" << config.projects.size() << L"\n";
     for (size_t i = 0; i < config.projects.size(); ++i) {
@@ -140,6 +158,8 @@ AppConfig Config::Load() {
         } else if (section == L"General") {
             if (key == L"LastProject") {
                 config.lastProject = value;
+            } else if (key == L"ProjectSort") {
+                config.projectSortMode = ParseConfigSortMode(value);
             }
         } else if (section == L"Projects") {
             if (key.rfind(L"Item", 0) == 0 && !value.empty()) {

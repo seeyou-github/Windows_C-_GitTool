@@ -54,4 +54,6 @@ BEGIN
     IDS_MSG_INIT_GITIGNORE_FAILED "创建 .gitignore 失败。"
     IDS_MSG_NOT_GIT_REPO_HINT "该文件夹没有 Git 项目，请执行 git init 初始化。"
     IDS_MSG_ALREADY_GIT_REPO "该文件夹已经是 Git 仓库。"
+    IDS_BTN_SORT_NAME "Name"
+    IDS_BTN_SORT_ADDED "Added"
 END

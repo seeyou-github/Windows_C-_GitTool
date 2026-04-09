@@ -45,6 +45,14 @@ const std::wstring& ProjectStore::GetLastProject() const {
     return config_.lastProject;
 }
 
+void ProjectStore::SetProjectSortMode(ProjectSortMode mode) {
+    config_.projectSortMode = mode;
+}
+
+ProjectSortMode ProjectStore::GetProjectSortMode() const {
+    return config_.projectSortMode;
+}
+
 const std::vector<std::wstring>& ProjectStore::GetProjects() const {
     return config_.projects;
 }

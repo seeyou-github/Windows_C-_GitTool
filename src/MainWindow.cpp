@@ -119,6 +119,29 @@ std::wstring SelectFolderModern(HWND owner, const std::wstring& title,
     return selectedPath;
 }
 
+int CompareStringsIgnoreCase(const std::wstring& left, const std::wstring& right) {
+    return CompareStringOrdinal(left.c_str(), -1, right.c_str(), -1, TRUE) - CSTR_EQUAL;
+}
+
+std::wstring BaseNameFromPath(const std::wstring& path);
+
+std::vector<std::wstring> BuildSortedProjectList(const std::vector<std::wstring>& projects,
+                                                 ProjectSortMode sortMode) {
+    std::vector<std::wstring> sorted = projects;
+    if (sortMode == ProjectSortMode::Name) {
+        std::stable_sort(sorted.begin(), sorted.end(), [](const std::wstring& left, const std::wstring& right) {
+            const std::wstring leftName = BaseNameFromPath(left);
+            const std::wstring rightName = BaseNameFromPath(right);
+            const int byName = CompareStringsIgnoreCase(leftName, rightName);
+            if (byName != 0) {
+                return byName < 0;
+            }
+            return CompareStringsIgnoreCase(left, right) < 0;
+        });
+    }
+    return sorted;
+}
+
 void PaintMainWindowBackground(HDC dc, const RECT& rect, bool paintedStatusVisible,
                                const RECT& statusTextRect, const std::wstring& paintedStatusText,
                                HFONT uiFont) {
@@ -489,6 +512,8 @@ void FreeProjectListItemData(HWND listView) {
 bool IsOwnerDrawButtonId(UINT id) {
     return id == IDC_BTN_ADD_FOLDER ||
            id == IDC_BTN_CLONE ||
+           id == IDC_BTN_SORT_NAME ||
+           id == IDC_BTN_SORT_ADDED ||
            id == IDC_BTN_STATUS ||
            id == IDC_BTN_COMMIT ||
            id == IDC_BTN_PUSH ||
@@ -502,9 +527,13 @@ bool IsOwnerDrawButtonId(UINT id) {
 
 void DrawOwnerDrawButton(const DRAWITEMSTRUCT* dis) {
     RECT rect = dis->rcItem;
-    COLORREF background = ((dis->itemState & ODS_SELECTED) != 0)
-        ? DarkTheme::AccentBackground()
-        : DarkTheme::ControlBackground();
+    const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+    COLORREF background = DarkTheme::ControlBackground();
+    if (disabled) {
+        background = DarkTheme::PanelBackground();
+    } else if ((dis->itemState & ODS_SELECTED) != 0) {
+        background = DarkTheme::AccentBackground();
+    }
 
     HBRUSH brush = CreateSolidBrush(background);
     FillRect(dis->hDC, &rect, brush);
@@ -533,7 +562,7 @@ void DrawOwnerDrawButton(const DRAWITEMSTRUCT* dis) {
     }
 
     SetBkMode(dis->hDC, TRANSPARENT);
-    SetTextColor(dis->hDC, DarkTheme::TextColor());
+    SetTextColor(dis->hDC, disabled ? RGB(112, 118, 126) : DarkTheme::TextColor());
 
     wchar_t text[256] = {};
     GetWindowTextW(dis->hwndItem, text, 256);
@@ -3717,6 +3746,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case IDC_BTN_CLONE:
             RunClone();
             return 0;
+        case IDC_BTN_SORT_NAME:
+            SetProjectSortMode(ProjectSortMode::Name);
+            return 0;
+        case IDC_BTN_SORT_ADDED:
+            SetProjectSortMode(ProjectSortMode::AddedTime);
+            return 0;
         case IDC_BTN_STATUS:
             RunSimpleCommand({L"status", L"--short", L"--branch"}, false);
             return 0;
@@ -3919,8 +3954,12 @@ void MainWindow::CreateControls() {
     const darkui::Theme uiTheme = BuildDarkUiTheme();
     addFolderButtonControl_.Create(hwnd_, IDC_BTN_ADD_FOLDER, L"", uiTheme, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
     cloneButtonControl_.Create(hwnd_, IDC_BTN_CLONE, L"", uiTheme, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
+    sortNameButtonControl_.Create(hwnd_, IDC_BTN_SORT_NAME, L"", uiTheme, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
+    sortAddedButtonControl_.Create(hwnd_, IDC_BTN_SORT_ADDED, L"", uiTheme, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
     addFolderButton_ = addFolderButtonControl_.hwnd();
     cloneButton_ = cloneButtonControl_.hwnd();
+    sortNameButton_ = sortNameButtonControl_.hwnd();
+    sortAddedButton_ = sortAddedButtonControl_.hwnd();
     commandToolbarControl_.Create(hwnd_, 5002, BuildToolbarTheme(), WS_CHILD | WS_TABSTOP);
     commandToolbar_ = commandToolbarControl_.hwnd();
     projectList_ = CreateWindowExW(0, WC_LISTVIEWW, L"",
@@ -3975,6 +4014,9 @@ void MainWindow::CreateControls() {
 
     SetButtonText(IDC_BTN_ADD_FOLDER, IDS_BTN_ADD_FOLDER);
     SetButtonText(IDC_BTN_CLONE, IDS_BTN_CLONE);
+    SetButtonText(IDC_BTN_SORT_NAME, IDS_BTN_SORT_NAME);
+    SetButtonText(IDC_BTN_SORT_ADDED, IDS_BTN_SORT_ADDED);
+    UpdateProjectSortButtons();
     RefreshCommandToolbar(false);
     progressBarControl_.SetRange(0, 100);
     progressBarControl_.SetValue(0);
@@ -3988,7 +4030,8 @@ void MainWindow::CreateControls() {
 
 void MainWindow::ShowControls() {
     HWND controls[] = {
-        addFolderButton_, cloneButton_, commandToolbar_, projectList_, commitList_, logEdit_, logScrollBar_,
+        addFolderButton_, cloneButton_, sortNameButton_, sortAddedButton_,
+        commandToolbar_, projectList_, commitList_, logEdit_, logScrollBar_,
         stopButton_
     };
     for (HWND control : controls) {
@@ -4191,9 +4234,18 @@ void MainWindow::LayoutControls(int width, int height) {
     const int leftButtonsWidth = kLeftPanelWidth - kPadding;
     const int addButtonWidth = (leftButtonsWidth - leftButtonsGap) / 2;
     const int cloneButtonWidth = leftButtonsWidth - addButtonWidth - leftButtonsGap;
+    const int sortButtonHeight = 30;
+    const int sortTop = height - kPadding - sortButtonHeight;
+    const int projectListTop = 54;
+    const int projectListHeight = std::max(120, sortTop - projectListTop - 8);
+    const int sortButtonGap = 8;
+    const int sortButtonWidth = (leftButtonsWidth - sortButtonGap) / 2;
     MoveWindow(addFolderButton_, kPadding, kPadding, addButtonWidth, 34, TRUE);
     MoveWindow(cloneButton_, kPadding + addButtonWidth + leftButtonsGap, kPadding, cloneButtonWidth, 34, TRUE);
-    MoveWindow(projectList_, kPadding, 54, kLeftPanelWidth - kPadding, height - 66, TRUE);
+    MoveWindow(projectList_, kPadding, projectListTop, kLeftPanelWidth - kPadding, projectListHeight, TRUE);
+    MoveWindow(sortNameButton_, kPadding, sortTop, sortButtonWidth, sortButtonHeight, TRUE);
+    MoveWindow(sortAddedButton_, kPadding + sortButtonWidth + sortButtonGap, sortTop,
+               sortButtonWidth, sortButtonHeight, TRUE);
     UpdateProjectListColumnWidth(kLeftPanelWidth - kPadding);
 
     MoveWindow(commandToolbar_, rightX, kPadding, rightWidth, 48, TRUE);
@@ -4279,7 +4331,8 @@ void MainWindow::ApplyFonts() {
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     g_menuFont = menuFont_;
-    HWND controls[] = {addFolderButton_, cloneButton_, commitList_, logEdit_, stopButton_,
+    HWND controls[] = {addFolderButton_, cloneButton_, sortNameButton_, sortAddedButton_,
+                       commitList_, logEdit_, stopButton_,
                        buttonStatus_, buttonCommit_, buttonPush_,
                        buttonPull_, buttonFetch_, buttonBranch_, buttonRemote_, buttonOpenGitHub_};
     for (HWND control : controls) {
@@ -4293,12 +4346,26 @@ void MainWindow::ApplyFonts() {
     SendMessageW(ListView_GetHeader(commitList_), WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
 }
 
+void MainWindow::UpdateProjectSortButtons() {
+    const ProjectSortMode sortMode = GetProjectSortMode();
+    if (sortNameButton_ != nullptr) {
+        EnableWindow(sortNameButton_, sortMode != ProjectSortMode::Name);
+        InvalidateRect(sortNameButton_, nullptr, TRUE);
+    }
+    if (sortAddedButton_ != nullptr) {
+        EnableWindow(sortAddedButton_, sortMode != ProjectSortMode::AddedTime);
+        InvalidateRect(sortAddedButton_, nullptr, TRUE);
+    }
+}
+
 void MainWindow::LoadProjectsIntoList() {
     suppressProjectSelectionRefresh_ = true;
     FreeProjectListItemData(projectList_);
     ListView_DeleteAllItems(projectList_);
     int index = 0;
-    for (const std::wstring& path : projectStore_.GetProjects()) {
+    const std::vector<std::wstring> sortedProjects =
+        BuildSortedProjectList(projectStore_.GetProjects(), GetProjectSortMode());
+    for (const std::wstring& path : sortedProjects) {
         LVITEMW item{};
         item.mask = LVIF_TEXT | LVIF_PARAM;
         std::wstring label = BaseNameFromPath(path);
@@ -4663,6 +4730,25 @@ std::wstring MainWindow::GetSelectedCommitHash() const {
 std::wstring MainWindow::GetSelectedProjectDisplayName() const {
     const std::wstring path = GetSelectedProjectPath();
     return path.empty() ? LoadStringResource(IDS_APP_TITLE) : BaseNameFromPath(path);
+}
+
+ProjectSortMode MainWindow::GetProjectSortMode() const {
+    return projectStore_.GetProjectSortMode();
+}
+
+void MainWindow::SetProjectSortMode(ProjectSortMode mode) {
+    if (projectStore_.GetProjectSortMode() == mode) {
+        UpdateProjectSortButtons();
+        return;
+    }
+    const std::wstring selectedPath = GetSelectedProjectPath();
+    projectStore_.SetProjectSortMode(mode);
+    projectStore_.Save();
+    LoadProjectsIntoList();
+    if (!selectedPath.empty()) {
+        SelectProjectByPath(selectedPath);
+    }
+    UpdateProjectSortButtons();
 }
 
 void MainWindow::AddFolder() {

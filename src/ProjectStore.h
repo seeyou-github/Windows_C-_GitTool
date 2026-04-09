@@ -16,6 +16,8 @@ public:
 
     void SetLastProject(const std::wstring& path);
     const std::wstring& GetLastProject() const;
+    void SetProjectSortMode(ProjectSortMode mode);
+    ProjectSortMode GetProjectSortMode() const;
     const std::vector<std::wstring>& GetProjects() const;
 
     void SetWindowSize(int width, int height);

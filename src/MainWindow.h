@@ -34,6 +34,7 @@ private:
     void UpdateCommitListColumnWidths(int listWidth);
     void UpdateLogScrollBar();
     void ScrollLogToPosition(int position);
+    void UpdateProjectSortButtons();
     void ApplyFonts();
     void LoadProjectsIntoList();
     void RefreshCurrentRepository();
@@ -51,6 +52,8 @@ private:
     std::wstring GetSelectedProjectPath() const;
     std::wstring GetSelectedCommitHash() const;
     std::wstring GetSelectedProjectDisplayName() const;
+    ProjectSortMode GetProjectSortMode() const;
+    void SetProjectSortMode(ProjectSortMode mode);
     void AddFolder();
     void RunClone();
     void RemoveSelectedProject();
@@ -112,8 +115,12 @@ private:
     HWND hwnd_ = nullptr;
     darkui::Button addFolderButtonControl_;
     darkui::Button cloneButtonControl_;
+    darkui::Button sortNameButtonControl_;
+    darkui::Button sortAddedButtonControl_;
     HWND addFolderButton_ = nullptr;
     HWND cloneButton_ = nullptr;
+    HWND sortNameButton_ = nullptr;
+    HWND sortAddedButton_ = nullptr;
     HWND projectList_ = nullptr;
     HWND commitList_ = nullptr;
     HWND logEdit_ = nullptr;
