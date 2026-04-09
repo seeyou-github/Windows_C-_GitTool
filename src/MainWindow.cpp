@@ -8,6 +8,7 @@
 #include <objidl.h>
 #include <richedit.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <shlobj.h>
 #include <windowsx.h>
 
@@ -55,6 +56,68 @@ constexpr COLORREF kMenuText = RGB(40, 40, 40);
 constexpr COLORREF kLogDefaultText = RGB(170, 176, 184);
 std::unique_ptr<Gdiplus::Bitmap> g_githubBitmap;
 HICON g_githubIcon = nullptr;
+
+std::wstring SelectFolderLegacy(HWND owner, const std::wstring& title) {
+    BROWSEINFOW info{};
+    info.hwndOwner = owner;
+    info.lpszTitle = title.c_str();
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+    PIDLIST_ABSOLUTE itemId = SHBrowseForFolderW(&info);
+    if (itemId == nullptr) {
+        return L"";
+    }
+
+    wchar_t pathBuffer[MAX_PATH] = {};
+    SHGetPathFromIDListW(itemId, pathBuffer);
+    CoTaskMemFree(itemId);
+    return pathBuffer;
+}
+
+std::wstring SelectFolderModern(HWND owner, const std::wstring& title,
+                                const std::wstring& initialPath = L"") {
+    IFileOpenDialog* dialog = nullptr;
+    HRESULT result = CoCreateInstance(
+        CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+    if (FAILED(result) || dialog == nullptr) {
+        return SelectFolderLegacy(owner, title);
+    }
+
+    dialog->SetTitle(title.c_str());
+
+    DWORD options = 0;
+    result = dialog->GetOptions(&options);
+    if (SUCCEEDED(result)) {
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    }
+
+    if (!initialPath.empty()) {
+        IShellItem* initialFolder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(initialPath.c_str(), nullptr, IID_PPV_ARGS(&initialFolder))) &&
+            initialFolder != nullptr) {
+            dialog->SetFolder(initialFolder);
+            initialFolder->Release();
+        }
+    }
+
+    std::wstring selectedPath;
+    result = dialog->Show(owner);
+    if (SUCCEEDED(result)) {
+        IShellItem* selectedItem = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&selectedItem)) && selectedItem != nullptr) {
+            PWSTR fileSystemPath = nullptr;
+            if (SUCCEEDED(selectedItem->GetDisplayName(SIGDN_FILESYSPATH, &fileSystemPath)) &&
+                fileSystemPath != nullptr) {
+                selectedPath = fileSystemPath;
+                CoTaskMemFree(fileSystemPath);
+            }
+            selectedItem->Release();
+        }
+    }
+
+    dialog->Release();
+    return selectedPath;
+}
 
 void PaintMainWindowBackground(HDC dc, const RECT& rect, bool paintedStatusVisible,
                                const RECT& statusTextRect, const std::wstring& paintedStatusText,
@@ -2599,16 +2662,10 @@ LRESULT CALLBACK CloneWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         return 0;
     case WM_COMMAND:
         if (state != nullptr && LOWORD(wParam) == 4503) {
-            BROWSEINFOW info{};
-            info.hwndOwner = hwnd;
-            info.lpszTitle = L"Select clone destination";
-            info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-            PIDLIST_ABSOLUTE itemId = SHBrowseForFolderW(&info);
-            if (itemId != nullptr) {
-                wchar_t pathBuffer[MAX_PATH] = {};
-                SHGetPathFromIDListW(itemId, pathBuffer);
-                CoTaskMemFree(itemId);
-                state->targetDirectory = pathBuffer;
+            const std::wstring selectedPath =
+                SelectFolderModern(hwnd, L"Select clone destination", state->targetDirectory);
+            if (!selectedPath.empty()) {
+                state->targetDirectory = selectedPath;
                 state->pathEditControl.SetText(state->targetDirectory);
             }
             return 0;
@@ -4609,22 +4666,8 @@ std::wstring MainWindow::GetSelectedProjectDisplayName() const {
 }
 
 void MainWindow::AddFolder() {
-    BROWSEINFOW info{};
-    info.hwndOwner = hwnd_;
-    std::wstring title = LoadStringResource(IDS_MSG_ADD_REPO_TITLE);
-    info.lpszTitle = title.c_str();
-    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-    PIDLIST_ABSOLUTE itemId = SHBrowseForFolderW(&info);
-    if (itemId == nullptr) {
-        return;
-    }
-
-    wchar_t path[MAX_PATH] = {};
-    SHGetPathFromIDListW(itemId, path);
-    CoTaskMemFree(itemId);
-
-    const std::wstring repoPath = path;
+    const std::wstring title = LoadStringResource(IDS_MSG_ADD_REPO_TITLE);
+    const std::wstring repoPath = SelectFolderModern(hwnd_, title);
     if (repoPath.empty()) {
         return;
     }
@@ -4839,21 +4882,8 @@ void MainWindow::RunSimpleCommand(
 void MainWindow::RunGitInit(const std::wstring& requestedPath) {
     std::wstring repoPath = requestedPath;
     if (repoPath.empty()) {
-        BROWSEINFOW info{};
-        info.hwndOwner = hwnd_;
         std::wstring title = LoadStringResource(IDS_MSG_INIT_REPO_TITLE);
-        info.lpszTitle = title.c_str();
-        info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-        PIDLIST_ABSOLUTE itemId = SHBrowseForFolderW(&info);
-        if (itemId == nullptr) {
-            return;
-        }
-
-        wchar_t pathBuffer[MAX_PATH] = {};
-        SHGetPathFromIDListW(itemId, pathBuffer);
-        CoTaskMemFree(itemId);
-        repoPath = pathBuffer;
+        repoPath = SelectFolderModern(hwnd_, title);
     }
 
     if (repoPath.empty()) {

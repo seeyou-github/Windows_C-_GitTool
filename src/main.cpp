@@ -2,6 +2,7 @@
 
 #include <commctrl.h>
 #include <gdiplus.h>
+#include <objbase.h>
 #include <windows.h>
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
@@ -33,8 +34,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
     icc.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES;
     InitCommonControlsEx(&icc);
 
+    const HRESULT comInitResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(comInitResult)) {
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        CloseHandle(singleInstanceMutex);
+        return 1;
+    }
+    const bool shouldUninitializeCom = SUCCEEDED(comInitResult);
+
     MainWindow window;
     if (!window.Create(instance, nCmdShow)) {
+        if (shouldUninitializeCom) {
+            CoUninitialize();
+        }
         Gdiplus::GdiplusShutdown(gdiplusToken);
         CloseHandle(singleInstanceMutex);
         return 1;
@@ -46,6 +58,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
         DispatchMessageW(&msg);
     }
 
+    if (shouldUninitializeCom) {
+        CoUninitialize();
+    }
     Gdiplus::GdiplusShutdown(gdiplusToken);
     CloseHandle(singleInstanceMutex);
     return static_cast<int>(msg.wParam);
