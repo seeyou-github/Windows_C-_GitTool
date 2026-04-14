@@ -96,6 +96,7 @@ private:
     void UpdateSelectedRepositoryState(const std::wstring& path, bool known, bool isGitRepository);
     HMENU BuildBranchToolbarMenu(bool enabled);
     HMENU BuildRemoteToolbarMenu();
+    HMENU BuildOtherToolbarMenu();
     std::wstring GetGitHubWebUrlForRepo(const std::wstring& repoPath) const;
     std::wstring PromptForText(
         int titleId,
@@ -163,6 +164,7 @@ private:
     bool initialShowPrepared_ = false;
     HMENU branchToolbarMenu_ = nullptr;
     HMENU remoteToolbarMenu_ = nullptr;
+    HMENU otherToolbarMenu_ = nullptr;
     std::vector<std::wstring> cachedBranches_;
     HMENU commitContextMenu_ = nullptr;
     bool logScrollDragging_ = false;

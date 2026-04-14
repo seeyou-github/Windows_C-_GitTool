@@ -56,4 +56,8 @@ BEGIN
     IDS_MSG_ALREADY_GIT_REPO "该文件夹已经是 Git 仓库。"
     IDS_BTN_SORT_NAME "Name"
     IDS_BTN_SORT_ADDED "Added"
+    IDS_BTN_OTHER "other"
+    IDS_MENU_PUSH_FORCE "push --force"
+    IDS_MSG_FORCE_PUSH_WARN "该操作将覆盖远程所有提交"
+    IDS_MSG_FORCE_PUSH_TITLE "警告"
 END

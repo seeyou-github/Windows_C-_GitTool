@@ -43,4 +43,8 @@ BEGIN
     IDS_MSG_NO_BRANCHES "当前仓库没有可用分支。"
     IDS_MSG_REMOTE_UPDATED "已更新 origin 远程地址。"
     IDS_MSG_PROJECT_EXISTS "该仓库已在列表中。"
+    IDS_BTN_OTHER "other"
+    IDS_MENU_PUSH_FORCE "push --force"
+    IDS_MSG_FORCE_PUSH_WARN "该操作将覆盖远程所有提交"
+    IDS_MSG_FORCE_PUSH_TITLE "警告"
 END

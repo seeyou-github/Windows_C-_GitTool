@@ -216,6 +216,7 @@ darkui::Theme BuildDarkUiTheme(int fontHeight = -18, bool monospace = false) {
 darkui::Theme BuildToolbarTheme() {
     darkui::Theme theme = BuildDarkUiTheme(-22);
     theme.toolbarHeight = 54;
+    theme.itemHeight = (theme.itemHeight * 3) / 2;
     theme.textPadding = 6;
     theme.toolbarItem = RGB(46, 50, 58);
     theme.toolbarItemHot = RGB(58, 64, 74);
@@ -521,6 +522,7 @@ bool IsOwnerDrawButtonId(UINT id) {
            id == IDC_BTN_FETCH ||
            id == IDC_BTN_BRANCH ||
            id == IDC_BTN_REMOTE ||
+           id == IDC_BTN_OTHER ||
            id == IDC_BTN_OPEN_GITHUB ||
            id == IDC_BTN_STOP;
 }
@@ -3801,6 +3803,25 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case IDM_REMOTE_SET_ORIGIN:
             HandleRemoteMenuCommand(LOWORD(wParam));
             return 0;
+        case IDM_OTHER_PUSH_FORCE: {
+            const int confirmResult = MessageBoxW(
+                hwnd_,
+                LoadStringResource(IDS_MSG_FORCE_PUSH_WARN).c_str(),
+                LoadStringResource(IDS_MSG_FORCE_PUSH_TITLE).c_str(),
+                MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (confirmResult != IDOK) {
+                return 0;
+            }
+            const std::wstring path = GetSelectedProjectPath();
+            const std::wstring currentBranch = Trim(GitRunner::GetCurrentBranch(path));
+            if (currentBranch.empty()) {
+                MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_BRANCH_EMPTY).c_str(),
+                            LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+                return 0;
+            }
+            RunSimpleCommand({L"push", L"origin", currentBranch, L"--force"}, true);
+            return 0;
+        }
         case IDM_COMMIT_RESET_HARD:
         case IDM_COMMIT_RESET_SOFT:
         case IDM_COMMIT_EDIT_MESSAGE:
@@ -3915,6 +3936,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (remoteToolbarMenu_ != nullptr) {
             DestroyMenu(remoteToolbarMenu_);
             remoteToolbarMenu_ = nullptr;
+        }
+        if (otherToolbarMenu_ != nullptr) {
+            DestroyMenu(otherToolbarMenu_);
+            otherToolbarMenu_ = nullptr;
         }
         if (commitContextMenu_ != nullptr) {
             DestroyMenu(commitContextMenu_);
@@ -4140,8 +4165,13 @@ void MainWindow::RefreshCommandToolbar(bool running) {
         DestroyMenu(remoteToolbarMenu_);
         remoteToolbarMenu_ = nullptr;
     }
+    if (otherToolbarMenu_ != nullptr) {
+        DestroyMenu(otherToolbarMenu_);
+        otherToolbarMenu_ = nullptr;
+    }
     branchToolbarMenu_ = BuildBranchToolbarMenu(hasSelectedGitRepo);
     remoteToolbarMenu_ = BuildRemoteToolbarMenu();
+    otherToolbarMenu_ = BuildOtherToolbarMenu();
 
     std::vector<darkui::ToolbarItem> items;
     items.push_back({LoadStringResource(IDS_BTN_STATUS), IDC_BTN_STATUS, nullptr, nullptr, 0, false, false, running, false, false, false});
@@ -4151,6 +4181,7 @@ void MainWindow::RefreshCommandToolbar(bool running) {
     items.push_back({LoadStringResource(IDS_BTN_FETCH), IDC_BTN_FETCH, nullptr, nullptr, 0, false, false, running, false, false, false});
     items.push_back({LoadStringResource(IDS_BTN_BRANCH), IDC_BTN_BRANCH, nullptr, branchToolbarMenu_, 0, false, false, !hasSelectedGitRepo, false, false, true});
     items.push_back({LoadStringResource(IDS_BTN_REMOTE), IDC_BTN_REMOTE, nullptr, remoteToolbarMenu_, 0, false, false, !hasSelectedGitRepo, false, false, true});
+    items.push_back({LoadStringResource(IDS_BTN_OTHER), IDC_BTN_OTHER, nullptr, otherToolbarMenu_, 0, false, false, !hasSelectedGitRepo, false, false, true});
     darkui::ToolbarItem githubItem;
     githubItem.text = L"GitHub";
     githubItem.commandId = IDC_BTN_OPEN_GITHUB;
@@ -4218,6 +4249,15 @@ HMENU MainWindow::BuildRemoteToolbarMenu() {
     }
     AppendMenuW(menu, MF_STRING, IDM_REMOTE_SHOW, L"Show Remotes");
     AppendMenuW(menu, MF_STRING, IDM_REMOTE_SET_ORIGIN, L"Set Origin");
+    return menu;
+}
+
+HMENU MainWindow::BuildOtherToolbarMenu() {
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return nullptr;
+    }
+    AppendMenuW(menu, MF_STRING, IDM_OTHER_PUSH_FORCE, LoadStringResource(IDS_MENU_PUSH_FORCE).c_str());
     return menu;
 }
 
