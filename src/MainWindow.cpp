@@ -3491,6 +3491,10 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
                 DeleteFileW(state->cleanupFilePath.c_str());
             }
             if (!PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state))) {
+                if (state->cancelEvent != nullptr) {
+                    CloseHandle(state->cancelEvent);
+                    state->cancelEvent = nullptr;
+                }
                 delete state;
             }
             return 0;
@@ -3503,6 +3507,10 @@ DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
         DeleteFileW(state->cleanupFilePath.c_str());
     }
     if (!PostMessageW(state->hwnd, WM_APP_GIT_COMMAND_DONE, 0, reinterpret_cast<LPARAM>(state))) {
+        if (state->cancelEvent != nullptr) {
+            CloseHandle(state->cancelEvent);
+            state->cancelEvent = nullptr;
+        }
         delete state;
     }
     return 0;
@@ -3572,6 +3580,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             if (completedCancelEvent != nullptr) {
                 if (completedCancelEvent == currentCommitRefreshCancelEvent_) {
                     currentCommitRefreshCancelEvent_ = nullptr;
+                    currentCommitRefreshPath_.clear();
                 }
                 CloseHandle(completedCancelEvent);
                 state->cancelEvent = nullptr;
@@ -3831,6 +3840,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         default:
             if (LOWORD(wParam) == IDM_BRANCH_CREATE ||
                 LOWORD(wParam) == IDM_BRANCH_RENAME ||
+                LOWORD(wParam) == IDM_BRANCH_SWITCH ||
                 LOWORD(wParam) == IDM_BRANCH_SQUASH ||
                 LOWORD(wParam) == IDM_BRANCH_DELETE ||
                 (LOWORD(wParam) >= IDM_BRANCH_BASE && LOWORD(wParam) < IDM_BRANCH_BASE + 200)) {
@@ -4079,26 +4089,28 @@ void MainWindow::StopAsyncWork() {
         CloseHandle(currentCommitRefreshThread_);
         currentCommitRefreshThread_ = nullptr;
     }
-    if (currentCommitRefreshCancelEvent_ != nullptr) {
-        CloseHandle(currentCommitRefreshCancelEvent_);
-        currentCommitRefreshCancelEvent_ = nullptr;
-    }
+    currentCommitRefreshCancelEvent_ = nullptr;
+    currentCommitRefreshPath_.clear();
     if (currentCommandThread_ != nullptr) {
         WaitForSingleObject(currentCommandThread_, 5000);
         CloseHandle(currentCommandThread_);
         currentCommandThread_ = nullptr;
     }
-    if (currentCancelEvent_ != nullptr) {
-        CloseHandle(currentCancelEvent_);
-        currentCancelEvent_ = nullptr;
-    }
+    currentCancelEvent_ = nullptr;
 
     MSG msg{};
     while (PeekMessageW(&msg, hwnd_, WM_APP_GIT_COMMAND_DONE, WM_APP_GIT_COMMAND_OUTPUT, PM_REMOVE)) {
         switch (msg.message) {
-        case WM_APP_GIT_COMMAND_DONE:
-            delete reinterpret_cast<AsyncGitCommandState*>(msg.lParam);
+        case WM_APP_GIT_COMMAND_DONE: {
+            auto* state = reinterpret_cast<AsyncGitCommandState*>(msg.lParam);
+            if (state != nullptr) {
+                if (state->cancelEvent != nullptr) {
+                    CloseHandle(state->cancelEvent);
+                }
+                delete state;
+            }
             break;
+        }
         case WM_APP_GIT_COMMAND_OUTPUT:
             delete reinterpret_cast<AsyncGitOutputState*>(msg.lParam);
             break;
@@ -4219,26 +4231,9 @@ HMENU MainWindow::BuildBranchToolbarMenu(bool enabled) {
     UINT stateFlags = enabled ? MF_STRING : (MF_STRING | MF_GRAYED);
     AppendMenuW(menu, stateFlags, IDM_BRANCH_CREATE, L"+ Create Branch");
     AppendMenuW(menu, stateFlags, IDM_BRANCH_RENAME, L"Rename Current Branch");
+    AppendMenuW(menu, stateFlags, IDM_BRANCH_SWITCH, L"Switch Branch");
     AppendMenuW(menu, stateFlags, IDM_BRANCH_SQUASH, L"Squash Local Commits");
     AppendMenuW(menu, stateFlags, IDM_BRANCH_DELETE, L"Delete Branch");
-
-    if (!enabled) {
-        return menu;
-    }
-
-    const std::wstring path = GetSelectedProjectPath();
-    cachedBranches_ = GitRunner::GetLocalBranches(path);
-    const std::wstring currentBranch = GitRunner::GetCurrentBranch(path);
-    if (!cachedBranches_.empty()) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        for (size_t i = 0; i < cachedBranches_.size(); ++i) {
-            UINT flags = MF_STRING;
-            if (cachedBranches_[i] == currentBranch) {
-                flags |= MF_CHECKED;
-            }
-            AppendMenuW(menu, flags, IDM_BRANCH_BASE + static_cast<UINT>(i), cachedBranches_[i].c_str());
-        }
-    }
     return menu;
 }
 
@@ -4485,6 +4480,15 @@ void MainWindow::RefreshCommitList() {
         ShowCommitPlaceholder(L"Loading commits...");
     }
 
+    if (currentCommitRefreshThread_ != nullptr &&
+        currentCommitRefreshCancelEvent_ != nullptr &&
+        currentCommitRefreshPath_ == path &&
+        WaitForSingleObject(currentCommitRefreshThread_, 0) == WAIT_TIMEOUT) {
+        return;
+    }
+
+    CancelCommitRefresh();
+
     auto* state = new AsyncCommitRefreshState();
     state->hwnd = hwnd_;
     state->repoPath = path;
@@ -4497,19 +4501,8 @@ void MainWindow::RefreshCommitList() {
         return;
     }
 
-    if (currentCommitRefreshCancelEvent_ != nullptr) {
-        SetEvent(currentCommitRefreshCancelEvent_);
-    }
-    if (currentCommitRefreshThread_ != nullptr) {
-        WaitForSingleObject(currentCommitRefreshThread_, 5000);
-        CloseHandle(currentCommitRefreshThread_);
-        currentCommitRefreshThread_ = nullptr;
-    }
-    if (currentCommitRefreshCancelEvent_ != nullptr) {
-        CloseHandle(currentCommitRefreshCancelEvent_);
-        currentCommitRefreshCancelEvent_ = nullptr;
-    }
     currentCommitRefreshCancelEvent_ = state->cancelEvent;
+    currentCommitRefreshPath_ = path;
 
     const HANDLE thread = CreateThread(
         nullptr, 0, MainWindow::AsyncCommitRefreshThread, state, 0, nullptr);
@@ -4517,9 +4510,27 @@ void MainWindow::RefreshCommitList() {
         CloseHandle(state->cancelEvent);
         delete state;
         currentCommitRefreshCancelEvent_ = nullptr;
+        currentCommitRefreshPath_.clear();
         return;
     }
     currentCommitRefreshThread_ = thread;
+}
+
+void MainWindow::CancelCommitRefresh() {
+    const bool hadRefresh =
+        currentCommitRefreshCancelEvent_ != nullptr || currentCommitRefreshThread_ != nullptr;
+    if (currentCommitRefreshCancelEvent_ != nullptr) {
+        SetEvent(currentCommitRefreshCancelEvent_);
+    }
+    if (currentCommitRefreshThread_ != nullptr) {
+        CloseHandle(currentCommitRefreshThread_);
+        currentCommitRefreshThread_ = nullptr;
+    }
+    currentCommitRefreshCancelEvent_ = nullptr;
+    currentCommitRefreshPath_.clear();
+    if (hadRefresh) {
+        ++commitRefreshToken_;
+    }
 }
 
 void MainWindow::PopulateCommitList(const std::vector<CommitInfo>& commits) {
@@ -4988,6 +4999,9 @@ void MainWindow::RunSimpleCommand(
         return;
     }
 
+    if (refreshCommitsAfter) {
+        CancelCommitRefresh();
+    }
     commandRunning_ = true;
     cloneProgressEnabled_ = false;
     stopRequested_ = false;
@@ -5281,7 +5295,9 @@ void MainWindow::RunSquashLocalCommits() {
 }
 
 void MainWindow::RunDeleteBranch() {
-    const std::wstring currentBranch = GitRunner::GetCurrentBranch(GetSelectedProjectPath());
+    const std::wstring path = GetSelectedProjectPath();
+    cachedBranches_ = GitRunner::GetLocalBranches(path);
+    const std::wstring currentBranch = GitRunner::GetCurrentBranch(path);
     std::vector<std::wstring> branches;
     for (const auto& branch : cachedBranches_) {
         if (branch != currentBranch) {
@@ -5376,6 +5392,40 @@ void MainWindow::ShowBranchMenu() {
     DestroyMenu(menu);
 }
 
+void MainWindow::ShowBranchSwitchMenu() {
+    const std::wstring path = GetSelectedProjectPath();
+    if (path.empty()) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_SELECT_REPO).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    cachedBranches_ = GitRunner::GetLocalBranches(path);
+    if (cachedBranches_.empty()) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_NO_BRANCHES).c_str(),
+                    LoadStringResource(IDS_MSG_BRANCH_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    const std::wstring currentBranch = GitRunner::GetCurrentBranch(path);
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    for (size_t i = 0; i < cachedBranches_.size(); ++i) {
+        UINT flags = MF_STRING;
+        if (cachedBranches_[i] == currentBranch) {
+            flags |= MF_CHECKED;
+        }
+        AppendMenuW(menu, flags, IDM_BRANCH_BASE + static_cast<UINT>(i), cachedBranches_[i].c_str());
+    }
+
+    POINT point{};
+    GetCursorPos(&point);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, point.x, point.y, 0, hwnd_, nullptr);
+    DestroyMenu(menu);
+}
+
 void MainWindow::HandleBranchMenuCommand(UINT commandId) {
     if (commandId == IDM_BRANCH_CREATE) {
         bool accepted = false;
@@ -5407,6 +5457,11 @@ void MainWindow::HandleBranchMenuCommand(UINT commandId) {
             return;
         }
         RunSimpleCommand({L"branch", L"-m", branchName}, true);
+        return;
+    }
+
+    if (commandId == IDM_BRANCH_SWITCH) {
+        ShowBranchSwitchMenu();
         return;
     }
 

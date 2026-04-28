@@ -39,6 +39,7 @@ private:
     void LoadProjectsIntoList();
     void RefreshCurrentRepository();
     void RefreshCommitList();
+    void CancelCommitRefresh();
     void PopulateCommitList(const std::vector<CommitInfo>& commits);
     void ShowCommitPlaceholder(const std::wstring& message);
     void ClearLog();
@@ -79,6 +80,7 @@ private:
     void RunSquashLocalCommits();
     void RunDeleteBranch();
     void ShowBranchMenu();
+    void ShowBranchSwitchMenu();
     void HandleBranchMenuCommand(UINT commandId);
     void ShowRemoteMenu();
     void HandleRemoteMenuCommand(UINT commandId);
@@ -174,6 +176,7 @@ private:
     HANDLE currentCommandThread_ = nullptr;
     HANDLE currentCommitRefreshThread_ = nullptr;
     HANDLE currentCommitRefreshCancelEvent_ = nullptr;
+    std::wstring currentCommitRefreshPath_;
     unsigned long long commitRefreshToken_ = 0;
     std::wstring currentProjectPath_;
     COLORREF currentCommandOutputColor_ = RGB(170, 176, 184);
