@@ -467,6 +467,14 @@ HICON GetGitHubIcon() {
     return g_githubIcon;
 }
 
+void ReleaseSharedGdiPlusResources() {
+    if (g_githubIcon != nullptr) {
+        DestroyIcon(g_githubIcon);
+        g_githubIcon = nullptr;
+    }
+    g_githubBitmap.reset();
+}
+
 COLORREF MapAnsiColor(int code, COLORREF fallback) {
     switch (code) {
     case 30: return RGB(80, 80, 80);
@@ -3193,6 +3201,10 @@ std::vector<BYTE> BuildPromptDialogTemplate(bool multiline) {
 }  // namespace
 
 MainWindow::MainWindow() = default;
+
+void MainWindow::ReleaseSharedResources() {
+    ReleaseSharedGdiPlusResources();
+}
 
 bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     instance_ = instance;

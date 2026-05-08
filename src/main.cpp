@@ -36,6 +36,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
 
     const HRESULT comInitResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(comInitResult)) {
+        MainWindow::ReleaseSharedResources();
         Gdiplus::GdiplusShutdown(gdiplusToken);
         CloseHandle(singleInstanceMutex);
         return 1;
@@ -47,6 +48,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
         if (shouldUninitializeCom) {
             CoUninitialize();
         }
+        MainWindow::ReleaseSharedResources();
         Gdiplus::GdiplusShutdown(gdiplusToken);
         CloseHandle(singleInstanceMutex);
         return 1;
@@ -61,6 +63,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
     if (shouldUninitializeCom) {
         CoUninitialize();
     }
+    MainWindow::ReleaseSharedResources();
     Gdiplus::GdiplusShutdown(gdiplusToken);
     CloseHandle(singleInstanceMutex);
     return static_cast<int>(msg.wParam);

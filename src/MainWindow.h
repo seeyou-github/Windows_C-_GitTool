@@ -16,6 +16,7 @@ class MainWindow {
 public:
     MainWindow();
     bool Create(HINSTANCE instance, int nCmdShow);
+    static void ReleaseSharedResources();
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
