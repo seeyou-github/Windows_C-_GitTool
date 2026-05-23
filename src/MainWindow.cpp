@@ -5217,7 +5217,9 @@ void MainWindow::RunCommit() {
 
     std::vector<std::wstring> addCommand = {L"add", L"-A", L"--"};
     addCommand.insert(addCommand.end(), selectedPaths.begin(), selectedPaths.end());
-    RunSimpleCommand({L"commit", L"-F", tempFile}, true, tempFile, {addCommand});
+    std::vector<std::wstring> commitCommand = {L"commit", L"-F", tempFile, L"--"};
+    commitCommand.insert(commitCommand.end(), selectedPaths.begin(), selectedPaths.end());
+    RunSimpleCommand(commitCommand, true, tempFile, {addCommand});
 }
 
 void MainWindow::RunSquashLocalCommits() {
