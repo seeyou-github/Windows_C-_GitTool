@@ -24,11 +24,19 @@ struct CommitInfo {
 
 struct CommitFileDiff {
     wchar_t status = L'M';
+    wchar_t indexStatus = L' ';
+    wchar_t workTreeStatus = L' ';
     std::wstring path;
     std::wstring oldPath;
     std::wstring newPath;
     std::wstring patchPath;
     std::wstring patch;
+};
+
+struct GitConflictFile {
+    std::wstring path;
+    std::wstring oldRevision;
+    std::wstring newRevision;
 };
 
 class GitRunner {
@@ -60,6 +68,10 @@ public:
         const std::wstring& repoPath,
         const std::wstring& revision,
         const std::wstring& filePath);
+    static std::wstring GetRevertCommitMessage(
+        const std::wstring& repoPath,
+        const std::wstring& commitHash);
+    static std::vector<GitConflictFile> GetUnmergedFiles(const std::wstring& repoPath);
     static std::vector<CommitFileDiff> GetWorkingTreeDiffs(const std::wstring& repoPath);
     static std::wstring ReadWorkingTreeFile(const std::wstring& filePath);
 };

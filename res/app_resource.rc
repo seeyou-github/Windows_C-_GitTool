@@ -60,4 +60,9 @@ BEGIN
     IDS_MENU_PUSH_FORCE "push --force"
     IDS_MSG_FORCE_PUSH_WARN "该操作将覆盖远程所有提交"
     IDS_MSG_FORCE_PUSH_TITLE "警告"
+    IDS_MSG_REVERT_TITLE "git revert"
+    IDS_MSG_REVERT_PROMPT "编辑 revert 提交信息："
+    IDS_MSG_REVERT_CONFLICTS "git revert 产生冲突。请在冲突合并窗口解决后继续提交，或中止 revert。"
+    IDS_MSG_REVERT_ABORT_CONFIRM "确定要中止当前 git revert 吗？"
+    IDS_MSG_REVERT_NO_CONFLICTS "未检测到未合并文件。"
 END

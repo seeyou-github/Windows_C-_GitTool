@@ -78,6 +78,14 @@ private:
         const std::vector<std::vector<std::wstring>>& preCommands = {});
     void RunGitInit(const std::wstring& repoPath = L"");
     void RunCommit();
+    void RunRevertSelectedCommit(const std::wstring& hash);
+    void RunReapplySelectedCommit(const std::wstring& hash);
+    bool ShowRevertConflictWindow(const std::wstring& repoPath, const std::wstring& commitHash);
+    std::wstring PromptForRevertMessage(
+        const std::wstring& title,
+        const std::wstring& prompt,
+        const std::wstring& initialValue,
+        bool* accepted);
     void RunSquashLocalCommits();
     void RunDeleteBranch();
     void ShowBranchMenu();
@@ -89,7 +97,8 @@ private:
     bool CanEditSelectedCommitMessage() const;
     std::wstring PromptForCommitMessage(
         const std::wstring& repoPath,
-        std::vector<std::wstring>* selectedPaths,
+        std::vector<std::wstring>* selectedAddPaths,
+        std::vector<std::wstring>* selectedCommitPaths,
         bool* accepted);
     void SetButtonText(int controlId, int stringId);
     void SetWindowTextFromString(int stringId);

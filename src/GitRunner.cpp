@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 namespace {
@@ -471,6 +472,8 @@ std::vector<CommitFileDiff> GitRunner::GetCommitFileDiffs(
         }
         CommitFileDiff diff;
         diff.status = line[0];
+        diff.indexStatus = diff.status;
+        diff.workTreeStatus = diff.status;
         const size_t firstTabPos = line.find(L'\t');
         if (firstTabPos == std::wstring::npos) {
             diff.path = TrimText(line.substr(1));
@@ -518,6 +521,64 @@ std::wstring GitRunner::GetFileContentAtRevision(
     return result.success ? result.output : L"";
 }
 
+std::wstring GitRunner::GetRevertCommitMessage(
+    const std::wstring& repoPath,
+    const std::wstring& commitHash) {
+    const GitCommandResult subjectResult = RunGitCommand(
+        repoPath, {L"show", L"--format=%s", L"--no-patch", commitHash});
+    const std::wstring subject = subjectResult.success ? TrimText(StripAnsiEscapes(subjectResult.output)) : commitHash;
+
+    std::wstring message = L"Revert \"" + subject + L"\"\r\n\r\n";
+    message += L"This reverts commit " + commitHash + L".\r\n";
+    return message;
+}
+
+std::vector<GitConflictFile> GitRunner::GetUnmergedFiles(const std::wstring& repoPath) {
+    std::vector<GitConflictFile> files;
+    const GitCommandResult result = RunGitCommand(repoPath, {L"status", L"--porcelain=v1", L"-z"});
+    if (!result.success && result.output.empty()) {
+        return files;
+    }
+
+    std::set<std::wstring> seenPaths;
+    size_t index = 0;
+    while (index < result.output.size()) {
+        const size_t terminatorPos = result.output.find(L'\0', index);
+        if (terminatorPos == std::wstring::npos || terminatorPos - index < 4) {
+            break;
+        }
+
+        const std::wstring entry = result.output.substr(index, terminatorPos - index);
+        index = terminatorPos + 1;
+        if (entry.size() < 4) {
+            continue;
+        }
+
+        const wchar_t x = entry[0];
+        const wchar_t y = entry[1];
+        const bool unmerged =
+            (x == L'U' || y == L'U') ||
+            (x == L'A' && y == L'A') ||
+            (x == L'D' && y == L'D');
+        if (!unmerged) {
+            continue;
+        }
+
+        std::wstring path = entry.substr(3);
+        if (path.empty() || seenPaths.find(path) != seenPaths.end()) {
+            continue;
+        }
+        seenPaths.insert(path);
+
+        GitConflictFile file;
+        file.path = path;
+        file.oldRevision = L":2";
+        file.newRevision = L":3";
+        files.push_back(file);
+    }
+    return files;
+}
+
 std::vector<CommitFileDiff> GitRunner::GetWorkingTreeDiffs(const std::wstring& repoPath) {
     std::vector<CommitFileDiff> diffs;
     const GitCommandResult result = RunGitCommand(
@@ -544,6 +605,8 @@ std::vector<CommitFileDiff> GitRunner::GetWorkingTreeDiffs(const std::wstring& r
         CommitFileDiff diff;
         if (entry.rfind(L"?? ", 0) == 0) {
             diff.status = L'A';
+            diff.indexStatus = L'?';
+            diff.workTreeStatus = L'?';
             diff.path = entry.substr(3);
             diff.oldPath.clear();
             diff.newPath = diff.path;
@@ -552,6 +615,8 @@ std::vector<CommitFileDiff> GitRunner::GetWorkingTreeDiffs(const std::wstring& r
             const wchar_t x = entry[0];
             const wchar_t y = entry[1];
             const std::wstring pathText = entry.substr(3);
+            diff.indexStatus = x;
+            diff.workTreeStatus = y;
 
             if (x == L'R' || y == L'R') {
                 if (index >= result.output.size()) {

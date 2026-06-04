@@ -26,6 +26,8 @@ constexpr wchar_t kDarkScrollBarClass[] = L"GitVisualToolDarkScrollBar";
 constexpr wchar_t kCommitDetailWindowClass[] = L"GitVisualToolCommitDetailWindow";
 constexpr wchar_t kDiffContentWindowClass[] = L"GitVisualToolDiffContentWindow";
 constexpr wchar_t kCommitComposeWindowClass[] = L"GitVisualToolCommitComposeWindow";
+constexpr wchar_t kRevertConflictWindowClass[] = L"GitVisualToolRevertConflictWindow";
+constexpr wchar_t kRevertMessageWindowClass[] = L"GitVisualToolRevertMessageWindow";
 constexpr wchar_t kSquashComposeWindowClass[] = L"GitVisualToolSquashComposeWindow";
 constexpr wchar_t kCloneWindowClass[] = L"GitVisualToolCloneWindow";
 constexpr wchar_t kDeleteBranchWindowClass[] = L"GitVisualToolDeleteBranchWindow";
@@ -678,6 +680,16 @@ std::string WideToUtf8(const std::wstring& text) {
     return utf8;
 }
 
+bool WriteUtf8TextFile(const std::wstring& filePath, const std::wstring& text) {
+    std::ofstream output(filePath.c_str(), std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+        return false;
+    }
+    const std::string utf8 = WideToUtf8(text);
+    output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+    return output.good();
+}
+
 void AddListViewRowsPadding(HWND listView, int count) {
     if (count <= 0) {
         return;
@@ -792,6 +804,7 @@ struct CommitComposeWindowState {
     std::vector<CommitFileDiff> diffs;
     std::vector<bool> checked;
     std::vector<std::wstring> selectedPaths;
+    std::vector<std::wstring> selectedCommitPaths;
     HWND fileList = nullptr;
     HWND selectAllButton = nullptr;
     HWND messageEdit = nullptr;
@@ -809,6 +822,52 @@ struct CommitComposeWindowState {
     WNDPROC editProc = nullptr;
     bool initializingChecks = false;
     bool selectAllActive = false;
+    bool accepted = false;
+};
+
+struct RevertConflictWindowState {
+    HWND parent = nullptr;
+    std::wstring repoPath;
+    std::wstring commitHash;
+    std::vector<GitConflictFile> files;
+    size_t selectedIndex = 0;
+    HWND fileList = nullptr;
+    HWND oldLabel = nullptr;
+    HWND resultLabel = nullptr;
+    HWND newLabel = nullptr;
+    HWND oldEdit = nullptr;
+    HWND resultEdit = nullptr;
+    HWND newEdit = nullptr;
+    HWND continueButton = nullptr;
+    HWND abortButton = nullptr;
+    HWND refreshButton = nullptr;
+    darkui::Button continueButtonControl;
+    darkui::Button abortButtonControl;
+    darkui::Button refreshButtonControl;
+    HFONT uiFont = nullptr;
+    HFONT codeFont = nullptr;
+    WNDPROC oldEditProc = nullptr;
+    WNDPROC resultEditProc = nullptr;
+    WNDPROC newEditProc = nullptr;
+    bool syncingScroll = false;
+    bool accepted = false;
+    bool aborted = false;
+};
+
+struct RevertMessageWindowState {
+    HWND parent = nullptr;
+    std::wstring title;
+    std::wstring prompt;
+    std::wstring message;
+    HWND promptLabel = nullptr;
+    HWND messageEdit = nullptr;
+    HWND okButton = nullptr;
+    HWND cancelButton = nullptr;
+    darkui::Button okButtonControl;
+    darkui::Button cancelButtonControl;
+    HFONT uiFont = nullptr;
+    HFONT codeFont = nullptr;
+    WNDPROC editProc = nullptr;
     bool accepted = false;
 };
 
@@ -991,6 +1050,39 @@ std::vector<std::wstring> GetCommitComposeSelectedPaths(const CommitComposeWindo
     return selectedPaths;
 }
 
+std::vector<std::wstring> GetCommitComposeCommitPaths(const CommitComposeWindowState* state) {
+    std::vector<std::wstring> commitPaths;
+    if (state == nullptr) {
+        return commitPaths;
+    }
+
+    for (size_t i = 0; i < state->diffs.size() && i < state->checked.size(); ++i) {
+        if (!state->checked[i]) {
+            continue;
+        }
+
+        const CommitFileDiff& diff = state->diffs[i];
+        if (diff.indexStatus == L'A' && diff.workTreeStatus == L'D') {
+            continue;
+        }
+        if (diff.status == L'R') {
+            if (!diff.oldPath.empty()) {
+                commitPaths.push_back(diff.oldPath);
+            }
+            if (!diff.newPath.empty() && diff.newPath != diff.oldPath) {
+                commitPaths.push_back(diff.newPath);
+            }
+            continue;
+        }
+
+        const std::wstring& path = diff.status == L'D' ? diff.oldPath : diff.patchPath;
+        if (!path.empty()) {
+            commitPaths.push_back(path);
+        }
+    }
+    return commitPaths;
+}
+
 void ReloadCommitComposeFileList(CommitComposeWindowState* state) {
     if (state == nullptr || state->fileList == nullptr) {
         return;
@@ -999,6 +1091,7 @@ void ReloadCommitComposeFileList(CommitComposeWindowState* state) {
     state->diffs = GitRunner::GetWorkingTreeDiffs(state->repoPath);
     state->checked.assign(state->diffs.size(), true);
     state->selectedPaths.clear();
+    state->selectedCommitPaths.clear();
     state->initializingChecks = true;
     ListView_DeleteAllItems(state->fileList);
     for (size_t i = 0; i < state->diffs.size(); ++i) {
@@ -1871,6 +1964,511 @@ LRESULT CALLBACK DiffEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
     return result;
 }
 
+void SyncRevertConflictEditors(RevertConflictWindowState* state, HWND sourceEdit) {
+    if (state == nullptr || state->syncingScroll) {
+        return;
+    }
+
+    HWND edits[] = {state->oldEdit, state->resultEdit, state->newEdit};
+    const int sourceLine = static_cast<int>(SendMessageW(sourceEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+    state->syncingScroll = true;
+    for (HWND edit : edits) {
+        if (edit == nullptr || edit == sourceEdit) {
+            continue;
+        }
+        const int targetLine = static_cast<int>(SendMessageW(edit, EM_GETFIRSTVISIBLELINE, 0, 0));
+        const int delta = sourceLine - targetLine;
+        if (delta != 0) {
+            SendMessageW(edit, EM_LINESCROLL, 0, delta);
+        }
+    }
+    state->syncingScroll = false;
+}
+
+LRESULT CALLBACK RevertConflictEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    HWND parent = GetParent(hwnd);
+    auto* state = reinterpret_cast<RevertConflictWindowState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+    WNDPROC originalProc = nullptr;
+    if (state != nullptr) {
+        if (hwnd == state->oldEdit) {
+            originalProc = state->oldEditProc;
+        } else if (hwnd == state->resultEdit) {
+            originalProc = state->resultEditProc;
+        } else if (hwnd == state->newEdit) {
+            originalProc = state->newEditProc;
+        }
+    }
+    if (originalProc == nullptr) {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    const LRESULT result = CallWindowProcW(originalProc, hwnd, message, wParam, lParam);
+    if (state != nullptr) {
+        switch (message) {
+        case WM_MOUSEWHEEL:
+        case WM_VSCROLL:
+        case WM_KEYDOWN:
+            SyncRevertConflictEditors(state, hwnd);
+            break;
+        default:
+            break;
+        }
+    }
+    return result;
+}
+
+std::wstring GetRichEditText(HWND edit) {
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    if (length > 0) {
+        GetWindowTextW(edit, text.data(), length + 1);
+    }
+    text.resize(static_cast<size_t>(length));
+    return text;
+}
+
+bool TextContainsConflictMarkers(const std::wstring& text) {
+    return text.find(L"<<<<<<<") != std::wstring::npos ||
+           text.find(L"=======") != std::wstring::npos ||
+           text.find(L">>>>>>>") != std::wstring::npos;
+}
+
+bool IsConflictMarkerLine(const std::wstring& line) {
+    return line.rfind(L"<<<<<<<", 0) == 0 ||
+           line.rfind(L"=======", 0) == 0 ||
+           line.rfind(L">>>>>>>", 0) == 0;
+}
+
+std::unordered_map<std::wstring, int> BuildLineFrequencyMap(const std::wstring& text) {
+    std::unordered_map<std::wstring, int> frequency;
+    for (const auto& line : SplitTextLines(text)) {
+        ++frequency[line];
+    }
+    return frequency;
+}
+
+void ClearRichEdit(HWND edit) {
+    if (edit == nullptr) {
+        return;
+    }
+    SetWindowTextW(edit, L"");
+    SendMessageW(edit, EM_SETMODIFY, FALSE, 0);
+}
+
+std::wstring BuildConflictWorkTreePath(const RevertConflictWindowState* state) {
+    if (state == nullptr || state->selectedIndex >= state->files.size()) {
+        return L"";
+    }
+    return (std::filesystem::path(state->repoPath) /
+            std::filesystem::path(state->files[state->selectedIndex].path)).wstring();
+}
+
+void RefreshRevertConflictFileList(RevertConflictWindowState* state) {
+    if (state == nullptr || state->fileList == nullptr) {
+        return;
+    }
+
+    state->files = GitRunner::GetUnmergedFiles(state->repoPath);
+    if (state->selectedIndex >= state->files.size()) {
+        state->selectedIndex = 0;
+    }
+
+    ListBox_ResetContent(state->fileList);
+    for (const auto& file : state->files) {
+        ListBox_AddString(state->fileList, file.path.c_str());
+    }
+    if (!state->files.empty()) {
+        ListBox_SetCurSel(state->fileList, static_cast<int>(state->selectedIndex));
+    }
+}
+
+void LoadSelectedRevertConflictFile(RevertConflictWindowState* state) {
+    if (state == nullptr || state->selectedIndex >= state->files.size()) {
+        SetWindowTextW(state->oldEdit, L"");
+        SetWindowTextW(state->resultEdit, L"");
+        SetWindowTextW(state->newEdit, L"");
+        return;
+    }
+
+    const GitConflictFile& file = state->files[state->selectedIndex];
+    const std::wstring oldContent = GitRunner::GetFileContentAtRevision(
+        state->repoPath, state->commitHash + L"^", file.path);
+    const std::wstring newContent = GitRunner::GetFileContentAtRevision(
+        state->repoPath, state->commitHash, file.path);
+    const std::wstring resultContent = GitRunner::ReadWorkingTreeFile(BuildConflictWorkTreePath(state));
+
+    state->syncingScroll = true;
+    ClearRichEdit(state->oldEdit);
+    ClearRichEdit(state->resultEdit);
+    ClearRichEdit(state->newEdit);
+    ConfigureRichEditColors(state->oldEdit, state->codeFont, DarkTheme::ControlBackground(), RGB(190, 196, 204));
+    ConfigureRichEditColors(state->resultEdit, state->codeFont, DarkTheme::ControlBackground(), RGB(190, 196, 204));
+    ConfigureRichEditColors(state->newEdit, state->codeFont, DarkTheme::ControlBackground(), RGB(190, 196, 204));
+
+    const std::vector<DiffDisplayLine> rows = BuildDiffDisplayLines(oldContent, newContent, false);
+    const std::vector<std::wstring> resultLines = SplitTextLines(resultContent);
+    const auto oldLineFrequency = BuildLineFrequencyMap(oldContent);
+    const auto newLineFrequency = BuildLineFrequencyMap(newContent);
+    const size_t rowCount = std::max(rows.size(), resultLines.size());
+    for (size_t i = 0; i < rowCount; ++i) {
+        if (i < rows.size()) {
+            const auto& row = rows[i];
+            AppendRichEditLine(
+                state->oldEdit,
+                row.beforeText + L"\r\n",
+                row.same ? RGB(190, 196, 204) : RGB(245, 196, 202),
+                row.same ? DarkTheme::ControlBackground() : RGB(49, 33, 35));
+            AppendRichEditLine(
+                state->newEdit,
+                row.afterText + L"\r\n",
+                row.same ? RGB(190, 196, 204) : RGB(245, 196, 202),
+                row.same ? DarkTheme::ControlBackground() : RGB(49, 33, 35));
+        } else {
+            AppendRichEditLine(state->oldEdit, L"\r\n", RGB(120, 120, 120), DarkTheme::PanelBackground());
+            AppendRichEditLine(state->newEdit, L"\r\n", RGB(120, 120, 120), DarkTheme::PanelBackground());
+        }
+
+        if (i < resultLines.size()) {
+            const bool marker = IsConflictMarkerLine(resultLines[i]);
+            const auto oldIt = oldLineFrequency.find(resultLines[i]);
+            const auto newIt = newLineFrequency.find(resultLines[i]);
+            const bool appearsInBothSides =
+                oldIt != oldLineFrequency.end() &&
+                newIt != newLineFrequency.end() &&
+                oldIt->second > 0 &&
+                newIt->second > 0;
+            const bool changed = marker || !appearsInBothSides;
+            AppendRichEditLine(
+                state->resultEdit,
+                resultLines[i] + L"\r\n",
+                marker ? RGB(245, 196, 202) : (changed ? RGB(202, 242, 208) : RGB(190, 196, 204)),
+                marker ? RGB(49, 33, 35) : (changed ? RGB(28, 49, 34) : DarkTheme::ControlBackground()));
+        } else {
+            AppendRichEditLine(state->resultEdit, L"\r\n", RGB(120, 120, 120), DarkTheme::PanelBackground());
+        }
+    }
+
+    SendMessageW(state->resultEdit, EM_SETMODIFY, FALSE, 0);
+    state->syncingScroll = false;
+    ScrollDiffEditorToLine(state->oldEdit, 0);
+    ScrollDiffEditorToLine(state->resultEdit, 0);
+    ScrollDiffEditorToLine(state->newEdit, 0);
+}
+
+bool SaveSelectedRevertConflictFile(RevertConflictWindowState* state, HWND owner) {
+    const std::wstring filePath = BuildConflictWorkTreePath(state);
+    if (filePath.empty()) {
+        return true;
+    }
+
+    const std::wstring text = GetRichEditText(state->resultEdit);
+    if (TextContainsConflictMarkers(text)) {
+        MessageBoxW(owner, L"Resolve all conflict markers in the middle editor before continuing.",
+                    L"git revert", MB_ICONWARNING);
+        return false;
+    }
+
+    if (!WriteUtf8TextFile(filePath, text)) {
+        MessageBoxW(owner, L"Failed to save merged result.",
+                    L"git revert", MB_ICONERROR);
+        return false;
+    }
+
+    const GitCommandResult addResult = GitRunner::RunGitCommand(
+        state->repoPath, {L"add", L"--", state->files[state->selectedIndex].path});
+    if (!addResult.success) {
+        MessageBoxW(owner, addResult.output.c_str(), L"git add", MB_ICONERROR);
+        return false;
+    }
+    return true;
+}
+
+void RenderRevertConflictEditors(RevertConflictWindowState* state) {
+    if (state == nullptr) {
+        return;
+    }
+    ConfigureRichEditColors(state->oldEdit, state->codeFont, DarkTheme::ControlBackground(), RGB(190, 196, 204));
+    ConfigureRichEditColors(state->resultEdit, state->codeFont, DarkTheme::ControlBackground(), RGB(190, 196, 204));
+    ConfigureRichEditColors(state->newEdit, state->codeFont, DarkTheme::ControlBackground(), RGB(190, 196, 204));
+}
+
+LRESULT CALLBACK RevertConflictWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<RevertConflictWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<RevertConflictWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->fileList = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4301), cs->hInstance, nullptr);
+        state->oldLabel = CreateWindowExW(0, L"STATIC", L"Old commit",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->resultLabel = CreateWindowExW(0, L"STATIC", L"Merge result",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->newLabel = CreateWindowExW(0, L"STATIC", L"New commit",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->oldEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
+                ES_NOHIDESEL | WS_VSCROLL | WS_HSCROLL,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->resultEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
+                ES_NOHIDESEL | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->newEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY |
+                ES_NOHIDESEL | WS_VSCROLL | WS_HSCROLL,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->continueButtonControl.Create(hwnd, 4302, L"Continue", BuildDarkUiTheme());
+        state->abortButtonControl.Create(hwnd, 4303, L"Abort", BuildDangerButtonTheme());
+        state->refreshButtonControl.Create(hwnd, 4304, L"Refresh", BuildDarkUiTheme());
+        state->continueButton = state->continueButtonControl.hwnd();
+        state->abortButton = state->abortButtonControl.hwnd();
+        state->refreshButton = state->refreshButtonControl.hwnd();
+
+        SendMessageW(state->fileList, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->oldLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->resultLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        SendMessageW(state->newLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        RenderRevertConflictEditors(state);
+        DarkTheme::ApplyDarkControlTheme(state->fileList);
+        DarkTheme::ApplyDarkControlTheme(state->oldEdit);
+        DarkTheme::ApplyDarkControlTheme(state->resultEdit);
+        DarkTheme::ApplyDarkControlTheme(state->newEdit);
+        state->oldEditProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->oldEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(RevertConflictEditProc)));
+        state->resultEditProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->resultEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(RevertConflictEditProc)));
+        state->newEditProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->newEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(RevertConflictEditProc)));
+        RefreshRevertConflictFileList(state);
+        LoadSelectedRevertConflictFile(state);
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 12;
+            const int listWidth = 260;
+            const int buttonHeight = 32;
+            const int labelHeight = 24;
+            const int gap = 10;
+            const int bottomTop = rc.bottom - padding - buttonHeight;
+            const int editorsLeft = padding + listWidth + gap;
+            const int editorsWidth = rc.right - editorsLeft - padding;
+            const int columnWidth = (editorsWidth - gap * 2) / 3;
+            const int labelTop = padding;
+            const int editTop = padding + labelHeight + 6;
+            const int editHeight = bottomTop - editTop - gap;
+            MoveWindow(state->fileList, padding, padding, listWidth, bottomTop - padding - gap, TRUE);
+            MoveWindow(state->oldLabel, editorsLeft, labelTop, columnWidth, labelHeight, TRUE);
+            MoveWindow(state->resultLabel, editorsLeft + columnWidth + gap, labelTop, columnWidth, labelHeight, TRUE);
+            MoveWindow(state->newLabel, editorsLeft + (columnWidth + gap) * 2, labelTop, columnWidth, labelHeight, TRUE);
+            MoveWindow(state->oldEdit, editorsLeft, editTop, columnWidth, editHeight, TRUE);
+            MoveWindow(state->resultEdit, editorsLeft + columnWidth + gap, editTop, columnWidth, editHeight, TRUE);
+            MoveWindow(state->newEdit, editorsLeft + (columnWidth + gap) * 2, editTop, columnWidth, editHeight, TRUE);
+            MoveWindow(state->continueButton, rc.right - padding - 120, bottomTop, 120, buttonHeight, TRUE);
+            MoveWindow(state->abortButton, rc.right - padding - 250, bottomTop, 120, buttonHeight, TRUE);
+            MoveWindow(state->refreshButton, rc.right - padding - 380, bottomTop, 120, buttonHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == 4301 && HIWORD(wParam) == LBN_SELCHANGE) {
+            if (SendMessageW(state->resultEdit, EM_GETMODIFY, 0, 0) != 0) {
+                const int saveResult = MessageBoxW(
+                    hwnd,
+                    L"Save the current merge result before switching files?",
+                    L"git revert",
+                    MB_ICONQUESTION | MB_YESNOCANCEL);
+                if (saveResult == IDCANCEL) {
+                    ListBox_SetCurSel(state->fileList, static_cast<int>(state->selectedIndex));
+                    return 0;
+                }
+                if (saveResult == IDYES && !SaveSelectedRevertConflictFile(state, hwnd)) {
+                    ListBox_SetCurSel(state->fileList, static_cast<int>(state->selectedIndex));
+                    return 0;
+                }
+            }
+            const int index = static_cast<int>(SendMessageW(state->fileList, LB_GETCURSEL, 0, 0));
+            if (index >= 0 && static_cast<size_t>(index) < state->files.size()) {
+                state->selectedIndex = static_cast<size_t>(index);
+                LoadSelectedRevertConflictFile(state);
+            }
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == 4304) {
+            RefreshRevertConflictFileList(state);
+            LoadSelectedRevertConflictFile(state);
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == 4303) {
+            state->aborted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == 4302) {
+            if (!SaveSelectedRevertConflictFile(state, hwnd)) {
+                return 0;
+            }
+            RefreshRevertConflictFileList(state);
+            if (!state->files.empty()) {
+                LoadSelectedRevertConflictFile(state);
+                MessageBoxW(hwnd, L"Current file was marked resolved. Resolve the remaining files.",
+                            L"git revert", MB_ICONINFORMATION);
+                return 0;
+            }
+            state->accepted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_CLOSE:
+        if (state != nullptr) {
+            state->aborted = true;
+        }
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (state != nullptr && state->parent != nullptr && IsWindow(state->parent)) {
+            EnableWindow(state->parent, TRUE);
+            SetForegroundWindow(state->parent);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK RevertMessageEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    HWND parent = GetParent(hwnd);
+    auto* state = reinterpret_cast<RevertMessageWindowState*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+    if (state == nullptr || state->editProc == nullptr) {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    if (message == WM_KEYDOWN && wParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        SendMessageW(parent, WM_COMMAND, IDOK, 0);
+        return 0;
+    }
+
+    return CallWindowProcW(state->editProc, hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK RevertMessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<RevertMessageWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<RevertMessageWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        DarkTheme::ApplyTitleBar(hwnd);
+
+        state->promptLabel = CreateWindowExW(
+            0, L"STATIC", state->prompt.c_str(),
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->messageEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, state->message.c_str(),
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
+                WS_VSCROLL | WS_TABSTOP,
+            0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
+        state->okButtonControl.Create(hwnd, IDOK, L"OK", BuildDarkUiTheme());
+        state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
+        state->okButton = state->okButtonControl.hwnd();
+        state->cancelButton = state->cancelButtonControl.hwnd();
+
+        SendMessageW(state->promptLabel, WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+        ConfigureRichEditColors(
+            state->messageEdit,
+            state->codeFont,
+            DarkTheme::ControlBackground(),
+            DarkTheme::TextColor());
+        DarkTheme::ApplyDarkControlTheme(state->messageEdit);
+        SendMessageW(state->messageEdit, EM_SETLIMITTEXT, 8192, 0);
+        state->editProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(state->messageEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(RevertMessageEditProc)));
+        SetFocus(state->messageEdit);
+        return 0;
+    }
+    case WM_SIZE:
+        if (state != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int padding = 14;
+            const int labelHeight = 24;
+            const int buttonHeight = 34;
+            const int buttonWidth = 110;
+            const int gap = 10;
+            const int buttonTop = rc.bottom - padding - buttonHeight;
+            const int editTop = padding + labelHeight + 8;
+            const int editHeight = buttonTop - editTop - gap;
+            MoveWindow(state->promptLabel, padding, padding, rc.right - padding * 2, labelHeight, TRUE);
+            MoveWindow(state->messageEdit, padding, editTop, rc.right - padding * 2, editHeight, TRUE);
+            MoveWindow(state->cancelButton, rc.right - padding - buttonWidth, buttonTop, buttonWidth, buttonHeight, TRUE);
+            MoveWindow(state->okButton, rc.right - padding - buttonWidth * 2 - gap, buttonTop, buttonWidth, buttonHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == IDOK) {
+            state->message = GetRichEditText(state->messageEdit);
+            state->accepted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, DarkTheme::TextColor());
+        SetBkColor(dc, DarkTheme::ControlBackground());
+        return reinterpret_cast<LRESULT>(DarkTheme::ControlBrush());
+    }
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, DarkTheme::WindowBrush());
+        return 1;
+    }
+    case WM_DESTROY:
+        if (state != nullptr && state->parent != nullptr && IsWindow(state->parent)) {
+            EnableWindow(state->parent, TRUE);
+            SetForegroundWindow(state->parent);
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
 LRESULT CALLBACK PromptEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     HWND dialog = GetParent(hwnd);
     auto* state = reinterpret_cast<PromptDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
@@ -2399,6 +2997,7 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
                 text.assign(buffer.data());
             }
             state->selectedPaths = GetCommitComposeSelectedPaths(state);
+            state->selectedCommitPaths = GetCommitComposeCommitPaths(state);
             if (state->selectedPaths.empty()) {
                 UpdateCommitComposeOkState(state);
                 return 0;
@@ -3259,6 +3858,24 @@ bool MainWindow::Create(HINSTANCE instance, int nCmdShow) {
     composeClass.lpszClassName = kCommitComposeWindowClass;
     RegisterClassExW(&composeClass);
 
+    WNDCLASSEXW revertConflictClass{};
+    revertConflictClass.cbSize = sizeof(revertConflictClass);
+    revertConflictClass.lpfnWndProc = RevertConflictWindowProc;
+    revertConflictClass.hInstance = instance_;
+    revertConflictClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    revertConflictClass.hbrBackground = DarkTheme::WindowBrush();
+    revertConflictClass.lpszClassName = kRevertConflictWindowClass;
+    RegisterClassExW(&revertConflictClass);
+
+    WNDCLASSEXW revertMessageClass{};
+    revertMessageClass.cbSize = sizeof(revertMessageClass);
+    revertMessageClass.lpfnWndProc = RevertMessageWindowProc;
+    revertMessageClass.hInstance = instance_;
+    revertMessageClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    revertMessageClass.hbrBackground = DarkTheme::WindowBrush();
+    revertMessageClass.lpszClassName = kRevertMessageWindowClass;
+    RegisterClassExW(&revertMessageClass);
+
     WNDCLASSEXW confirmClass{};
     confirmClass.cbSize = sizeof(confirmClass);
     confirmClass.lpfnWndProc = ConfirmWindowProc;
@@ -3746,6 +4363,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             DrawNormalMenuItem(dis);
             return TRUE;
         }
+        if (dis != nullptr && dis->CtlType == ODT_MENU && dis->itemID == IDM_COMMIT_REVERT) {
+            DrawNormalMenuItem(dis);
+            return TRUE;
+        }
+        if (dis != nullptr && dis->CtlType == ODT_MENU && dis->itemID == IDM_COMMIT_REAPPLY) {
+            DrawNormalMenuItem(dis);
+            return TRUE;
+        }
         break;
     }
     case WM_MEASUREITEM: {
@@ -3754,7 +4379,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             (mis->itemID == IDM_COMMIT_RESET_HARD ||
              mis->itemID == IDM_COMMIT_RESET_SOFT ||
              mis->itemID == IDM_COMMIT_EDIT_MESSAGE ||
-             mis->itemID == IDM_COMMIT_COPY_HASH)) {
+             mis->itemID == IDM_COMMIT_COPY_HASH ||
+             mis->itemID == IDM_COMMIT_REVERT ||
+             mis->itemID == IDM_COMMIT_REAPPLY)) {
             mis->itemWidth = 320;
             mis->itemHeight = 52;
             return TRUE;
@@ -3847,6 +4474,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case IDM_COMMIT_RESET_SOFT:
         case IDM_COMMIT_EDIT_MESSAGE:
         case IDM_COMMIT_COPY_HASH:
+        case IDM_COMMIT_REVERT:
+        case IDM_COMMIT_REAPPLY:
             HandleCommitMenuCommand(LOWORD(wParam));
             return 0;
         default:
@@ -4881,6 +5510,8 @@ void MainWindow::ShowCommitContextMenu(POINT screenPoint) {
         InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_EDIT_MESSAGE, L"edit commit message", insertIndex++);
     }
     InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_COPY_HASH, L"copy commit hash", insertIndex++);
+    InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_REVERT, L"git revert", insertIndex++);
+    InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_REAPPLY, L"Reapply", insertIndex++);
     InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_HARD, L"git reset here (Hard)", insertIndex++);
     InsertOwnerDrawMenuItem(commitContextMenu_, IDM_COMMIT_RESET_SOFT, L"git reset here (Soft)", insertIndex++);
     TrackPopupMenu(commitContextMenu_, TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
@@ -5188,8 +5819,10 @@ void MainWindow::RunClone() {
 void MainWindow::RunCommit() {
     bool accepted = false;
     const std::wstring path = GetSelectedProjectPath();
-    std::vector<std::wstring> selectedPaths;
-    const std::wstring message = Trim(PromptForCommitMessage(path, &selectedPaths, &accepted));
+    std::vector<std::wstring> selectedAddPaths;
+    std::vector<std::wstring> selectedCommitPaths;
+    const std::wstring message = Trim(PromptForCommitMessage(
+        path, &selectedAddPaths, &selectedCommitPaths, &accepted));
     if (!accepted) {
         return;
     }
@@ -5198,8 +5831,13 @@ void MainWindow::RunCommit() {
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
         return;
     }
-    if (selectedPaths.empty()) {
+    if (selectedAddPaths.empty()) {
         MessageBoxW(hwnd_, L"Select at least one file to commit.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+        return;
+    }
+    if (selectedCommitPaths.empty()) {
+        MessageBoxW(hwnd_, L"The selected files do not leave any committable path after staging.",
                     LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
         return;
     }
@@ -5216,10 +5854,185 @@ void MainWindow::RunCommit() {
     }
 
     std::vector<std::wstring> addCommand = {L"add", L"-A", L"--"};
-    addCommand.insert(addCommand.end(), selectedPaths.begin(), selectedPaths.end());
+    addCommand.insert(addCommand.end(), selectedAddPaths.begin(), selectedAddPaths.end());
     std::vector<std::wstring> commitCommand = {L"commit", L"-F", tempFile, L"--"};
-    commitCommand.insert(commitCommand.end(), selectedPaths.begin(), selectedPaths.end());
+    commitCommand.insert(commitCommand.end(), selectedCommitPaths.begin(), selectedCommitPaths.end());
     RunSimpleCommand(commitCommand, true, tempFile, {addCommand});
+}
+
+bool MainWindow::ShowRevertConflictWindow(const std::wstring& repoPath, const std::wstring& commitHash) {
+    auto* state = new RevertConflictWindowState();
+    state->parent = hwnd_;
+    state->repoPath = repoPath;
+    state->commitHash = commitHash;
+    state->files = GitRunner::GetUnmergedFiles(repoPath);
+    state->uiFont = uiFont_;
+    state->codeFont = logFont_;
+
+    if (state->files.empty()) {
+        delete state;
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_REVERT_NO_CONFLICTS).c_str(),
+                    LoadStringResource(IDS_MSG_REVERT_TITLE).c_str(), MB_ICONINFORMATION);
+        return false;
+    }
+
+    RECT parentRect{};
+    GetWindowRect(hwnd_, &parentRect);
+    const int width = std::max(1180, static_cast<int>((parentRect.right - parentRect.left) * 9 / 10));
+    const int height = std::max(720, static_cast<int>((parentRect.bottom - parentRect.top) * 9 / 10));
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(hwnd_, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kRevertConflictWindowClass,
+        L"git revert conflicts",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE | WS_THICKFRAME,
+        x, y, width, height,
+        nullptr, nullptr, instance_, state);
+    if (dialog == nullptr) {
+        EnableWindow(hwnd_, TRUE);
+        delete state;
+        return false;
+    }
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool accepted = state->accepted;
+    const bool aborted = state->aborted;
+    delete state;
+
+    if (aborted) {
+        const int result = MessageBoxW(
+            hwnd_,
+            LoadStringResource(IDS_MSG_REVERT_ABORT_CONFIRM).c_str(),
+            LoadStringResource(IDS_MSG_REVERT_TITLE).c_str(),
+            MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+        if (result == IDYES) {
+            AppendCommandResult(GitRunner::RunGitCommand(repoPath, {L"revert", L"--abort"}));
+            RefreshCommitList();
+        }
+        return false;
+    }
+
+    return accepted;
+}
+
+void MainWindow::RunRevertSelectedCommit(const std::wstring& hash) {
+    const std::wstring path = GetSelectedProjectPath();
+    if (path.empty() || hash.empty()) {
+        return;
+    }
+    if (commandRunning_) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMAND_RUNNING).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    const GitCommandResult statusResult = GitRunner::RunGitCommand(path, {L"status", L"--porcelain"});
+    if (!statusResult.success) {
+        AppendCommandResult(statusResult);
+        return;
+    }
+    if (!Trim(statusResult.output).empty()) {
+        MessageBoxW(hwnd_, L"Commit or stash working tree changes before running git revert.",
+                    LoadStringResource(IDS_MSG_REVERT_TITLE).c_str(), MB_ICONWARNING);
+        return;
+    }
+
+    AppendLog(L"$ " + BuildGitCommandText({L"revert", L"--no-commit", hash}));
+    GitCommandResult revertResult = GitRunner::RunGitCommand(path, {L"revert", L"--no-commit", hash});
+    AppendCommandResult(revertResult);
+    if (!revertResult.success) {
+        const auto conflicts = GitRunner::GetUnmergedFiles(path);
+        if (conflicts.empty()) {
+            MessageBoxW(hwnd_, revertResult.output.c_str(),
+                        LoadStringResource(IDS_MSG_REVERT_TITLE).c_str(), MB_ICONERROR);
+            return;
+        }
+
+        if (!ShowRevertConflictWindow(path, hash)) {
+            return;
+        }
+
+        AppendLog(L"$ " + BuildGitCommandText({L"-c", L"core.editor=true", L"revert", L"--continue"}));
+        GitCommandResult continueResult = GitRunner::RunGitCommand(
+            path, {L"-c", L"core.editor=true", L"revert", L"--continue"});
+        AppendCommandResult(continueResult);
+        if (!continueResult.success) {
+            MessageBoxW(hwnd_, continueResult.output.c_str(),
+                        LoadStringResource(IDS_MSG_REVERT_TITLE).c_str(), MB_ICONERROR);
+            return;
+        }
+        RefreshCommitList();
+        RefreshCurrentRepository();
+        return;
+    }
+
+    bool accepted = false;
+    const std::wstring defaultMessage = GitRunner::GetRevertCommitMessage(path, hash);
+    const std::wstring message = PromptForRevertMessage(
+        LoadStringResource(IDS_MSG_REVERT_TITLE),
+        LoadStringResource(IDS_MSG_REVERT_PROMPT),
+        defaultMessage,
+        &accepted);
+    if (!accepted) {
+        AppendCommandResult(GitRunner::RunGitCommand(path, {L"reset", L"--hard", L"HEAD"}));
+        RefreshCurrentRepository();
+        return;
+    }
+    if (Trim(message).empty()) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMIT_EMPTY).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
+        AppendCommandResult(GitRunner::RunGitCommand(path, {L"reset", L"--hard", L"HEAD"}));
+        RefreshCurrentRepository();
+        return;
+    }
+
+    wchar_t tempPath[MAX_PATH] = {};
+    wchar_t tempFile[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempPath);
+    GetTempFileNameW(tempPath, L"gcm", 0, tempFile);
+    if (!WriteUtf8TextFile(tempFile, message)) {
+        MessageBoxW(hwnd_, L"Failed to write revert commit message.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONERROR);
+        AppendCommandResult(GitRunner::RunGitCommand(path, {L"reset", L"--hard", L"HEAD"}));
+        return;
+    }
+
+    RunSimpleCommand({L"commit", L"-F", tempFile}, true, tempFile);
+}
+
+void MainWindow::RunReapplySelectedCommit(const std::wstring& hash) {
+    const std::wstring path = GetSelectedProjectPath();
+    if (path.empty() || hash.empty()) {
+        return;
+    }
+    if (commandRunning_) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_COMMAND_RUNNING).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    const GitCommandResult statusResult = GitRunner::RunGitCommand(path, {L"status", L"--porcelain"});
+    if (!statusResult.success) {
+        AppendCommandResult(statusResult);
+        return;
+    }
+    if (!Trim(statusResult.output).empty()) {
+        MessageBoxW(hwnd_, L"Commit or stash working tree changes before running Reapply.",
+                    LoadStringResource(IDS_MSG_REVERT_TITLE).c_str(), MB_ICONWARNING);
+        return;
+    }
+
+    RunRevertSelectedCommit(hash);
 }
 
 void MainWindow::RunSquashLocalCommits() {
@@ -5592,6 +6405,16 @@ void MainWindow::HandleCommitMenuCommand(UINT commandId) {
         return;
     }
 
+    if (commandId == IDM_COMMIT_REVERT) {
+        RunRevertSelectedCommit(hash);
+        return;
+    }
+
+    if (commandId == IDM_COMMIT_REAPPLY) {
+        RunReapplySelectedCommit(hash);
+        return;
+    }
+
     if (commandId == IDM_COMMIT_EDIT_MESSAGE) {
         if (!CanEditSelectedCommitMessage()) {
             MessageBoxW(hwnd_, L"Only the latest local unpushed commit can be edited.",
@@ -5661,7 +6484,8 @@ void MainWindow::UpdateWindowTitle() {
 
 std::wstring MainWindow::PromptForCommitMessage(
     const std::wstring& repoPath,
-    std::vector<std::wstring>* selectedPaths,
+    std::vector<std::wstring>* selectedAddPaths,
+    std::vector<std::wstring>* selectedCommitPaths,
     bool* accepted) {
     auto* state = new CommitComposeWindowState();
     state->parent = hwnd_;
@@ -5705,12 +6529,70 @@ std::wstring MainWindow::PromptForCommitMessage(
 
     const bool wasAccepted = state->accepted;
     const std::wstring text = state->message;
-    const std::vector<std::wstring> paths = state->selectedPaths;
+    const std::vector<std::wstring> addPaths = state->selectedPaths;
+    const std::vector<std::wstring> commitPaths = state->selectedCommitPaths;
     if (accepted != nullptr) {
         *accepted = wasAccepted;
     }
-    if (selectedPaths != nullptr) {
-        *selectedPaths = wasAccepted ? paths : std::vector<std::wstring>{};
+    if (selectedAddPaths != nullptr) {
+        *selectedAddPaths = wasAccepted ? addPaths : std::vector<std::wstring>{};
+    }
+    if (selectedCommitPaths != nullptr) {
+        *selectedCommitPaths = wasAccepted ? commitPaths : std::vector<std::wstring>{};
+    }
+    delete state;
+    return wasAccepted ? text : L"";
+}
+
+std::wstring MainWindow::PromptForRevertMessage(
+    const std::wstring& title,
+    const std::wstring& prompt,
+    const std::wstring& initialValue,
+    bool* accepted) {
+    auto* state = new RevertMessageWindowState();
+    state->parent = hwnd_;
+    state->title = title;
+    state->prompt = prompt;
+    state->message = initialValue;
+    state->uiFont = uiFont_;
+    state->codeFont = logFont_;
+
+    RECT parentRect{};
+    GetWindowRect(hwnd_, &parentRect);
+    const int width = std::max(760, static_cast<int>((parentRect.right - parentRect.left) * 6 / 10));
+    const int height = std::max(420, static_cast<int>((parentRect.bottom - parentRect.top) * 5 / 10));
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(hwnd_, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kRevertMessageWindowClass,
+        state->title.c_str(),
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE | WS_THICKFRAME,
+        x, y, width, height,
+        nullptr, nullptr, instance_, state);
+    if (dialog == nullptr) {
+        EnableWindow(hwnd_, TRUE);
+        delete state;
+        if (accepted != nullptr) {
+            *accepted = false;
+        }
+        return L"";
+    }
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool wasAccepted = state->accepted;
+    const std::wstring text = state->message;
+    if (accepted != nullptr) {
+        *accepted = wasAccepted;
     }
     delete state;
     return wasAccepted ? text : L"";
