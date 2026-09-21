@@ -1114,6 +1114,147 @@ void ReloadCommitComposeFileList(CommitComposeWindowState* state) {
     UpdateCommitComposeResetState(state);
 }
 
+constexpr UINT kCommitComposeMenuOpenFolder = 4310;
+constexpr UINT kCommitComposeMenuDeleteFile = 4311;
+
+std::wstring GetCommitComposeContextRelativePath(const CommitFileDiff& diff) {
+    if (!diff.patchPath.empty()) {
+        return diff.patchPath;
+    }
+    if (diff.status == L'D' && !diff.oldPath.empty()) {
+        return diff.oldPath;
+    }
+    if (!diff.newPath.empty()) {
+        return diff.newPath;
+    }
+    if (!diff.oldPath.empty()) {
+        return diff.oldPath;
+    }
+    return diff.path;
+}
+
+std::wstring BuildCommitComposeFullPath(const std::wstring& repoPath, const std::wstring& relativePath) {
+    std::wstring relative = relativePath;
+    std::replace(relative.begin(), relative.end(), L'/', L'\\');
+    std::wstring full = repoPath;
+    if (!full.empty() && full.back() != L'\\' && full.back() != L'/') {
+        full += L'\\';
+    }
+    full += relative;
+    return full;
+}
+
+void OpenCommitComposeContainingFolder(HWND owner, const std::wstring& repoPath, const CommitFileDiff& diff) {
+    const std::wstring relative = GetCommitComposeContextRelativePath(diff);
+    if (!relative.empty()) {
+        const std::wstring full = BuildCommitComposeFullPath(repoPath, relative);
+        std::error_code ec;
+        if (std::filesystem::exists(full, ec)) {
+            std::wstring params = L"/select,\"";
+            params += full;
+            params += L"\"";
+            ShellExecuteW(owner, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+            return;
+        }
+        const std::filesystem::path parent = std::filesystem::path(full).parent_path();
+        if (!parent.empty()) {
+            ShellExecuteW(owner, L"open", parent.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return;
+        }
+    }
+    if (!repoPath.empty()) {
+        ShellExecuteW(owner, L"open", repoPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
+
+void DeleteCommitComposeNewFile(HWND owner, CommitComposeWindowState* state, int index) {
+    if (state == nullptr || index < 0 || index >= static_cast<int>(state->diffs.size())) {
+        return;
+    }
+    const CommitFileDiff diff = state->diffs[static_cast<size_t>(index)];
+    if (diff.status != L'A') {
+        return;
+    }
+    const std::wstring relative = GetCommitComposeContextRelativePath(diff);
+    if (relative.empty()) {
+        return;
+    }
+    const std::wstring full = BuildCommitComposeFullPath(state->repoPath, relative);
+    std::wstring confirm = L"确定要删除新增文件吗？\r\n\r\n";
+    confirm += relative;
+    if (MessageBoxW(owner, confirm.c_str(), L"删除文件", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path target(full);
+    if (std::filesystem::exists(target, ec)) {
+        if (std::filesystem::is_directory(target, ec)) {
+            std::filesystem::remove_all(target, ec);
+        } else {
+            std::filesystem::remove(target, ec);
+        }
+        if (ec) {
+            MessageBoxW(owner, L"删除文件失败。", L"删除文件", MB_ICONERROR);
+            return;
+        }
+    }
+
+    if (diff.indexStatus == L'A') {
+        GitRunner::RunGitCommand(state->repoPath, {L"rm", L"--cached", L"--", relative});
+    }
+
+    ReloadCommitComposeFileList(state);
+}
+
+void ShowCommitComposeFileContextMenu(HWND hwnd, CommitComposeWindowState* state, LPARAM lParam) {
+    if (state == nullptr || state->fileList == nullptr || state->diffs.empty()) {
+        return;
+    }
+
+    POINT screenPoint{};
+    if (lParam == -1) {
+        GetCursorPos(&screenPoint);
+    } else {
+        screenPoint.x = GET_X_LPARAM(lParam);
+        screenPoint.y = GET_Y_LPARAM(lParam);
+    }
+
+    POINT clientPoint = screenPoint;
+    ScreenToClient(state->fileList, &clientPoint);
+    LVHITTESTINFO hit{};
+    hit.pt = clientPoint;
+    const int hitIndex = ListView_HitTest(state->fileList, &hit);
+    int index = hitIndex >= 0 ? hitIndex : ListView_GetNextItem(state->fileList, -1, LVNI_SELECTED);
+    if (index < 0 || index >= static_cast<int>(state->diffs.size())) {
+        return;
+    }
+
+    ListView_SetItemState(
+        state->fileList, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetSelectionMark(state->fileList, index);
+
+    const bool isNewFile = state->diffs[static_cast<size_t>(index)].status == L'A';
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, kCommitComposeMenuOpenFolder, L"打开文件所在文件夹");
+    if (isNewFile) {
+        AppendMenuW(menu, MF_STRING, kCommitComposeMenuDeleteFile, L"删除此文件");
+    }
+
+    const int command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+
+    if (command == static_cast<int>(kCommitComposeMenuOpenFolder)) {
+        OpenCommitComposeContainingFolder(hwnd, state->repoPath, state->diffs[static_cast<size_t>(index)]);
+    } else if (command == static_cast<int>(kCommitComposeMenuDeleteFile)) {
+        DeleteCommitComposeNewFile(hwnd, state, index);
+    }
+}
+
 bool ShowDarkConfirmDialog(HWND parent, HINSTANCE instance, HFONT uiFont, const std::wstring& title, const std::wstring& message, const std::wstring& confirmText) {
     auto* state = new ConfirmWindowState();
     state->parent = parent;
@@ -2905,6 +3046,12 @@ LRESULT CALLBACK CommitComposeWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         }
         break;
     }
+    case WM_CONTEXTMENU:
+        if (state != nullptr && reinterpret_cast<HWND>(wParam) == state->fileList) {
+            ShowCommitComposeFileContextMenu(hwnd, state, lParam);
+            return 0;
+        }
+        break;
     case WM_COMMAND:
         if (LOWORD(wParam) == 4303 && state != nullptr) {
             const int count = ListView_GetItemCount(state->fileList);
