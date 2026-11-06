@@ -24,6 +24,12 @@ private:
     static LRESULT CALLBACK LogScrollBarProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     static DWORD WINAPI AsyncGitCommandThread(LPVOID param);
     static DWORD WINAPI AsyncCommitRefreshThread(LPVOID param);
+    static LRESULT CALLBACK CommitPagerComboProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                                 UINT_PTR subclassId, DWORD_PTR refData);
+    static LRESULT CALLBACK CommitPagerPopupListProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                                     UINT_PTR subclassId, DWORD_PTR refData);
+    static LRESULT CALLBACK CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                               UINT_PTR subclassId, DWORD_PTR refData);
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void CreateControls();
@@ -42,6 +48,12 @@ private:
     void RefreshCommitList();
     void CancelCommitRefresh();
     void PopulateCommitList(const std::vector<CommitInfo>& commits);
+    void ApplyCommitPage();
+    void SetCommitPage(int page);
+    void UpdateCommitPager();
+    void LayoutCommitPagerItems(int availWidth);
+    void SyncCommitPagerCombo();
+    int HitTestCommitPagerItem(int x) const;
     void ShowCommitPlaceholder(const std::wstring& message);
     void ClearLog();
     void AppendLog(const std::wstring& text);
@@ -159,6 +171,21 @@ private:
     HWND buttonRemote_ = nullptr;
     HWND buttonOpenGitHub_ = nullptr;
     HWND stopButton_ = nullptr;
+    darkui::ComboBox commitPagerComboControl_;
+    HWND commitPagerCombo_ = nullptr;
+    HWND commitPagerBar_ = nullptr;
+    struct CommitPagerItem {
+        bool isPage = false;
+        int page = 0;  // 1-based page number when isPage
+    };
+    std::vector<CommitPagerItem> commitPagerItems_;
+    int commitPagerAvailWidth_ = 0;
+    int commitPagerBarWidth_ = 0;
+    int commitPagerButtonWidth_ = 44;
+    int commitPagerEllipsisWidth_ = 24;
+    bool commitPagerCompressed_ = false;
+    int pagerHoverIndex_ = -1;
+    bool pagerBarTracking_ = false;
     darkui::ProgressBar progressBarControl_;
     HWND progressBar_ = nullptr;
     HFONT uiFont_ = nullptr;
@@ -188,6 +215,10 @@ private:
     HANDLE currentCommitRefreshCancelEvent_ = nullptr;
     std::wstring currentCommitRefreshPath_;
     unsigned long long commitRefreshToken_ = 0;
+    std::vector<CommitInfo> allCommits_;
+    std::wstring commitListRepoPath_;
+    int commitPage_ = 0;
+    int commitPageCount_ = 0;
     std::wstring currentProjectPath_;
     COLORREF currentCommandOutputColor_ = RGB(170, 176, 184);
     std::wstring pendingCommandOutput_;

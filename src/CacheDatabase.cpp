@@ -264,7 +264,7 @@ std::vector<CommitInfo> CacheDatabase::GetCommitList(const std::wstring& repoPat
     if (it == commitLists_.end()) {
         return {};
     }
-    if (static_cast<int>(it->second.size()) <= limit) {
+    if (limit < 0 || static_cast<int>(it->second.size()) <= limit) {
         return it->second;
     }
     return std::vector<CommitInfo>(it->second.begin(), it->second.begin() + limit);

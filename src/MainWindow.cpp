@@ -51,6 +51,14 @@ constexpr int kLogScrollBarWidth = 14;
 constexpr int kStatusBarHeight = 32;
 constexpr size_t kMaxLogChars = 200000;
 constexpr size_t kLogTrimTargetChars = 150000;
+constexpr int kCommitPageSize = 50;
+constexpr int kCommitPagerHeight = 30;
+constexpr int kCommitPagerGap = 4;
+constexpr int kCommitPagerItemGap = 6;
+constexpr int kCommitPagerComboWidth = 96;
+constexpr UINT_PTR kPagerComboSubclassId = 101;
+constexpr UINT_PTR kPagerPopupSubclassId = 102;
+constexpr UINT_PTR kPagerBarSubclassId = 103;
 HFONT g_menuFont = nullptr;
 constexpr COLORREF kMenuBackground = RGB(242, 242, 242);
 constexpr COLORREF kMenuHoverBackground = RGB(228, 228, 228);
@@ -4230,6 +4238,197 @@ LRESULT CALLBACK MainWindow::LogScrollBarProc(HWND hwnd, UINT message, WPARAM wP
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+namespace {
+
+void ScrollPagePopupList(HWND list, int delta) {
+    const int step = delta > 0 ? -3 : 3;
+    const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
+    if (count <= 0) {
+        return;
+    }
+    const int top = static_cast<int>(SendMessageW(list, LB_GETTOPINDEX, 0, 0));
+    const int newTop = std::clamp(top + step, 0, count - 1);
+    SendMessageW(list, LB_SETTOPINDEX, static_cast<WPARAM>(newTop), 0);
+}
+
+}  // namespace
+
+LRESULT MainWindow::CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                       UINT_PTR subclassId, DWORD_PTR refData) {
+    auto* self = reinterpret_cast<MainWindow*>(refData);
+    if (self == nullptr) {
+        return DefSubclassProc(hwnd, message, wParam, lParam);
+    }
+
+    switch (message) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(dc, &client, DarkTheme::WindowBrush());
+
+        HFONT font = self->uiFont_ != nullptr ? self->uiFont_
+                                              : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
+        SetBkMode(dc, TRANSPARENT);
+
+        const COLORREF normalFill = DarkTheme::PanelBackground();
+        const COLORREF normalBorder = DarkTheme::BorderColor();
+        const COLORREF normalText = RGB(178, 184, 192);
+        const COLORREF hoverFill = DarkTheme::ControlBackground();
+        const COLORREF hoverBorder = RGB(100, 108, 122);
+        const COLORREF hoverText = DarkTheme::TextColor();
+        const COLORREF currentFill = RGB(84, 92, 106);
+        const COLORREF currentBorder = RGB(112, 120, 134);
+        const COLORREF currentText = RGB(245, 247, 250);
+        const COLORREF mutedText = RGB(140, 146, 156);
+
+        const int itemTop = 3;
+        const int itemBottom = client.bottom - 3;
+        int x = 0;
+        for (int i = 0; i < static_cast<int>(self->commitPagerItems_.size()); ++i) {
+            const CommitPagerItem& item = self->commitPagerItems_[i];
+            const int width = item.isPage ? self->commitPagerButtonWidth_
+                                          : self->commitPagerEllipsisWidth_;
+            RECT itemRect{x, itemTop, x + width, itemBottom};
+            if (itemRect.right > client.right) {
+                break;  // clip items that no longer fit
+            }
+            if (item.isPage) {
+                const bool current = item.page == self->commitPage_ + 1;
+                const bool hover = i == self->pagerHoverIndex_;
+                const COLORREF fill = current ? currentFill : (hover ? hoverFill : normalFill);
+                const COLORREF border = current ? currentBorder : (hover ? hoverBorder : normalBorder);
+                const COLORREF text = current ? currentText : (hover ? hoverText : normalText);
+                HBRUSH brush = CreateSolidBrush(fill);
+                HPEN pen = CreatePen(PS_SOLID, 1, border);
+                HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, brush));
+                HPEN oldPen = static_cast<HPEN>(SelectObject(dc, pen));
+                RoundRect(dc, itemRect.left, itemRect.top, itemRect.right, itemRect.bottom, 8, 8);
+                SelectObject(dc, oldBrush);
+                SelectObject(dc, oldPen);
+                DeleteObject(brush);
+                DeleteObject(pen);
+                SetTextColor(dc, text);
+                const std::wstring label = std::to_wstring(item.page);
+                DrawTextW(dc, label.c_str(), static_cast<int>(label.size()), &itemRect,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            } else {
+                SetTextColor(dc, mutedText);
+                DrawTextW(dc, L"…", 1, &itemRect,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            x = itemRect.right + kCommitPagerItemGap;
+        }
+
+        SelectObject(dc, oldFont);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        SetFocus(hwnd);
+        const int index = self->HitTestCommitPagerItem(GET_X_LPARAM(lParam));
+        if (index >= 0 && index < static_cast<int>(self->commitPagerItems_.size()) &&
+            self->commitPagerItems_[index].isPage) {
+            self->SetCommitPage(self->commitPagerItems_[index].page - 1);
+        }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        const int index = self->HitTestCommitPagerItem(GET_X_LPARAM(lParam));
+        const bool hoverable = index >= 0 &&
+                               index < static_cast<int>(self->commitPagerItems_.size()) &&
+                               self->commitPagerItems_[index].isPage;
+        const int newHover = hoverable ? index : -1;
+        if (newHover != self->pagerHoverIndex_) {
+            self->pagerHoverIndex_ = newHover;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (!self->pagerBarTracking_) {
+            TRACKMOUSEEVENT track{};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE;
+            track.hwndTrack = hwnd;
+            if (TrackMouseEvent(&track)) {
+                self->pagerBarTracking_ = true;
+            }
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        self->pagerBarTracking_ = false;
+        if (self->pagerHoverIndex_ != -1) {
+            self->pagerHoverIndex_ = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_MOUSEWHEEL: {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (delta != 0) {
+            self->SetCommitPage(self->commitPage_ + (delta > 0 ? -1 : 1));
+        }
+        return 0;
+    }
+    default:
+        break;
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT MainWindow::CommitPagerComboProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                         UINT_PTR subclassId, DWORD_PTR refData) {
+    auto* self = reinterpret_cast<MainWindow*>(refData);
+    if (self != nullptr && message == WM_MOUSEWHEEL) {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (delta != 0) {
+            const HWND popupList = self->commitPagerComboControl_.popup_list();
+            if (popupList != nullptr && IsWindowVisible(popupList)) {
+                ScrollPagePopupList(popupList, delta);
+            } else {
+                self->SetCommitPage(self->commitPage_ + (delta > 0 ? -1 : 1));
+            }
+        }
+        return 0;
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT MainWindow::CommitPagerPopupListProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                             UINT_PTR subclassId, DWORD_PTR refData) {
+    auto* self = reinterpret_cast<MainWindow*>(refData);
+    if (self != nullptr) {
+        switch (message) {
+        case WM_MOUSEWHEEL: {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            if (delta != 0) {
+                ScrollPagePopupList(hwnd, delta);
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            // Clicking the already-selected page does not raise LBN_SELCHANGE;
+            // close the popup so it behaves like a regular dropdown.
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (PtInRect(&client, pt)) {
+                const int selected = static_cast<int>(SendMessageW(hwnd, LB_GETCURSEL, 0, 0));
+                if (selected >= 0 && selected == self->commitPagerComboControl_.GetSelection()) {
+                    ShowWindow(GetParent(hwnd), SW_HIDE);
+                }
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
 DWORD WINAPI MainWindow::AsyncGitCommandThread(LPVOID param) {
     auto* state = reinterpret_cast<AsyncGitCommandState*>(param);
     if (state == nullptr) {
@@ -4550,7 +4749,15 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             SetProjectSortMode(ProjectSortMode::AddedTime);
             return 0;
         case IDC_BTN_STATUS:
-            RunSimpleCommand({L"status", L"--short", L"--branch"}, false);
+            RunSimpleCommand({L"status", L"--short", L"--branch"}, true);
+            return 0;
+        case IDC_COMBO_PAGE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                const int selected = commitPagerComboControl_.GetSelection();
+                if (selected >= 0) {
+                    SetCommitPage(selected);
+                }
+            }
             return 0;
         case IDC_BTN_COMMIT:
             RunCommit();
@@ -4808,6 +5015,20 @@ void MainWindow::CreateControls() {
     stopButton_ = stopButtonControl_.hwnd();
     progressBarControl_.Create(hwnd_, IDC_PROGRESS_GIT, BuildDarkUiTheme(), WS_CHILD);
     progressBar_ = progressBarControl_.hwnd();
+    commitPagerBar_ = CreateWindowExW(0, L"STATIC", L"",
+                                      WS_CHILD | SS_LEFT | SS_NOTIFY,
+                                      0, 0, 0, 0, hwnd_, nullptr, instance_, nullptr);
+    SetWindowSubclass(commitPagerBar_, MainWindow::CommitPagerBarProc, kPagerBarSubclassId,
+                      reinterpret_cast<DWORD_PTR>(this));
+    commitPagerComboControl_.Create(hwnd_, IDC_COMBO_PAGE, uiTheme,
+                                    WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
+    commitPagerCombo_ = commitPagerComboControl_.hwnd();
+    SetWindowSubclass(commitPagerCombo_, MainWindow::CommitPagerComboProc, kPagerComboSubclassId,
+                      reinterpret_cast<DWORD_PTR>(this));
+    if (commitPagerComboControl_.popup_list() != nullptr) {
+        SetWindowSubclass(commitPagerComboControl_.popup_list(), MainWindow::CommitPagerPopupListProc,
+                          kPagerPopupSubclassId, reinterpret_cast<DWORD_PTR>(this));
+    }
 
     ListView_SetExtendedListViewStyle(projectList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     ListView_SetExtendedListViewStyle(commitList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -5073,8 +5294,26 @@ void MainWindow::LayoutControls(int width, int height) {
 
     MoveWindow(commandToolbar_, rightX, kPadding, rightWidth, 48, TRUE);
 
-    MoveWindow(commitList_, rightX, contentTop, rightWidth, paneHeight, TRUE);
+    const bool pagerVisible = commitPageCount_ >= 1;
+    const int pagerStrip = pagerVisible ? (kCommitPagerHeight + kCommitPagerGap) : 0;
+    MoveWindow(commitList_, rightX, contentTop, rightWidth, paneHeight - pagerStrip, TRUE);
     UpdateCommitListColumnWidths(rightWidth);
+    if (pagerVisible && commitPagerBar_ != nullptr) {
+        const int pagerTop = contentTop + paneHeight - kCommitPagerHeight;
+        LayoutCommitPagerItems(rightWidth);
+        MoveWindow(commitPagerBar_, rightX, pagerTop, commitPagerBarWidth_, kCommitPagerHeight, TRUE);
+        if (commitPagerCompressed_ && commitPagerCombo_ != nullptr) {
+            MoveWindow(commitPagerCombo_, rightX + commitPagerBarWidth_ + kCommitPagerItemGap,
+                       pagerTop, kCommitPagerComboWidth, kCommitPagerHeight, TRUE);
+            ShowWindow(commitPagerCombo_, SW_SHOW);
+        } else if (commitPagerCombo_ != nullptr) {
+            ShowWindow(commitPagerCombo_, SW_HIDE);
+        }
+        SyncCommitPagerCombo();
+        InvalidateRect(commitPagerBar_, nullptr, TRUE);
+    } else if (commitPagerCombo_ != nullptr) {
+        ShowWindow(commitPagerCombo_, SW_HIDE);
+    }
     const int logTop = contentTop + paneHeight + splitGap;
     MoveWindow(logEdit_, rightX, logTop, rightWidth - kLogScrollBarWidth, paneHeight, TRUE);
     MoveWindow(logScrollBar_, rightX + rightWidth - kLogScrollBarWidth, logTop, kLogScrollBarWidth, paneHeight, TRUE);
@@ -5261,7 +5500,12 @@ void MainWindow::RefreshCommitList() {
         return;
     }
 
-    const auto cachedCommits = cacheDatabase_.GetCommitList(path, 50);
+    if (path != commitListRepoPath_) {
+        commitListRepoPath_ = path;
+        commitPage_ = 0;
+    }
+
+    const auto cachedCommits = cacheDatabase_.GetCommitList(path, -1);
     if (!cachedCommits.empty()) {
         PopulateCommitList(cachedCommits);
     } else {
@@ -5280,7 +5524,7 @@ void MainWindow::RefreshCommitList() {
     auto* state = new AsyncCommitRefreshState();
     state->hwnd = hwnd_;
     state->repoPath = path;
-    state->limit = 50;
+    state->limit = -1;
     state->token = ++commitRefreshToken_;
     state->previousCommits = cachedCommits;
     state->cancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -5322,19 +5566,175 @@ void MainWindow::CancelCommitRefresh() {
 }
 
 void MainWindow::PopulateCommitList(const std::vector<CommitInfo>& commits) {
+    allCommits_ = commits;
+    commitPageCount_ = static_cast<int>((allCommits_.size() + kCommitPageSize - 1) / kCommitPageSize);
+    if (commitPage_ >= commitPageCount_) {
+        commitPage_ = std::max(0, commitPageCount_ - 1);
+    }
+    UpdateCommitPager();
+    ApplyCommitPage();
+}
+
+void MainWindow::ApplyCommitPage() {
     ListView_DeleteAllItems(commitList_);
-    for (size_t i = 0; i < commits.size(); ++i) {
+    const size_t start = static_cast<size_t>(std::max(0, commitPage_)) * kCommitPageSize;
+    const size_t end = std::min(start + static_cast<size_t>(kCommitPageSize), allCommits_.size());
+    for (size_t i = start; i < end; ++i) {
+        const int row = static_cast<int>(i - start);
         LVITEMW item{};
         item.mask = LVIF_TEXT;
-        item.iItem = static_cast<int>(i);
-        item.pszText = const_cast<LPWSTR>(commits[i].hash.c_str());
+        item.iItem = row;
+        item.pszText = const_cast<LPWSTR>(allCommits_[i].hash.c_str());
         ListView_InsertItem(commitList_, &item);
-        ListView_SetItemText(commitList_, static_cast<int>(i), 1, const_cast<LPWSTR>(commits[i].message.c_str()));
-        ListView_SetItemText(commitList_, static_cast<int>(i), 2, const_cast<LPWSTR>(commits[i].date.c_str()));
+        ListView_SetItemText(commitList_, row, 1, const_cast<LPWSTR>(allCommits_[i].message.c_str()));
+        ListView_SetItemText(commitList_, row, 2, const_cast<LPWSTR>(allCommits_[i].date.c_str()));
     }
 }
 
+void MainWindow::SetCommitPage(int page) {
+    if (commitPageCount_ <= 0) {
+        return;
+    }
+    page = std::clamp(page, 0, commitPageCount_ - 1);
+    if (page == commitPage_) {
+        return;
+    }
+    commitPage_ = page;
+    ApplyCommitPage();
+    LayoutCommitPagerItems(commitPagerAvailWidth_);
+    if (commitPagerBar_ != nullptr) {
+        InvalidateRect(commitPagerBar_, nullptr, FALSE);
+    }
+    commitPagerComboControl_.SetSelection(commitPage_, false);
+}
+
+void MainWindow::UpdateCommitPager() {
+    const bool visible = commitPageCount_ >= 1;
+    if (commitPagerBar_ != nullptr) {
+        ShowWindow(commitPagerBar_, visible ? SW_SHOW : SW_HIDE);
+    }
+    if (visible && hwnd_ != nullptr && addFolderButton_ != nullptr) {
+        RECT rect{};
+        GetClientRect(hwnd_, &rect);
+        LayoutControls(rect.right - rect.left, rect.bottom - rect.top);
+    } else if (commitPagerCombo_ != nullptr) {
+        ShowWindow(commitPagerCombo_, SW_HIDE);
+    }
+}
+
+void MainWindow::LayoutCommitPagerItems(int availWidth) {
+    commitPagerAvailWidth_ = availWidth;
+    commitPagerItems_.clear();
+    commitPagerCompressed_ = false;
+    commitPagerBarWidth_ = 0;
+    const int pageCount = commitPageCount_;
+    if (pageCount <= 0 || commitPagerBar_ == nullptr) {
+        return;
+    }
+
+    HDC dc = GetDC(commitPagerBar_);
+    HFONT oldFont = uiFont_ != nullptr ? static_cast<HFONT>(SelectObject(dc, uiFont_)) : nullptr;
+    const std::wstring lastLabel = std::to_wstring(pageCount);
+    SIZE extent{};
+    GetTextExtentPoint32W(dc, lastLabel.c_str(), static_cast<int>(lastLabel.size()), &extent);
+    commitPagerButtonWidth_ = std::max(36, static_cast<int>(extent.cx) + 18);
+    GetTextExtentPoint32W(dc, L"…", 1, &extent);
+    commitPagerEllipsisWidth_ = std::max(22, static_cast<int>(extent.cx) + 14);
+    if (oldFont != nullptr) {
+        SelectObject(dc, oldFont);
+    }
+    ReleaseDC(commitPagerBar_, dc);
+
+    const int allItemsWidth =
+        pageCount * (commitPagerButtonWidth_ + kCommitPagerItemGap) - kCommitPagerItemGap;
+    if (allItemsWidth <= availWidth) {
+        // Everything fits: show every page button and no dropdown.
+        for (int p = 1; p <= pageCount; ++p) {
+            commitPagerItems_.push_back({true, p});
+        }
+        commitPagerBarWidth_ = availWidth;
+        return;
+    }
+
+    commitPagerCompressed_ = true;
+    const int comboReserve = kCommitPagerComboWidth + kCommitPagerItemGap;
+    const int barAvail = std::max(commitPagerButtonWidth_ * 2, availWidth - comboReserve);
+    commitPagerBarWidth_ = barAvail;
+
+    const int fixedWidth = commitPagerButtonWidth_ * 2 + commitPagerEllipsisWidth_ * 2 +
+                           kCommitPagerItemGap * 4;
+    int windowCount = (barAvail - fixedWidth + kCommitPagerItemGap) /
+                      (commitPagerButtonWidth_ + kCommitPagerItemGap);
+    windowCount = std::clamp(windowCount, 1, std::max(1, pageCount - 2));
+
+    const int current = commitPage_ + 1;
+    int windowStart = current - (windowCount - 1) / 2;
+    int windowEnd = windowStart + windowCount - 1;
+    if (windowStart < 2) {
+        windowStart = 2;
+        windowEnd = windowStart + windowCount - 1;
+    }
+    if (windowEnd > pageCount - 1) {
+        windowEnd = pageCount - 1;
+        windowStart = windowEnd - windowCount + 1;
+    }
+    windowStart = std::max(windowStart, 2);
+    windowEnd = std::min(windowEnd, pageCount - 1);
+    if (windowStart == 3) {
+        --windowStart;  // only page 2 hidden → show it instead of an ellipsis
+    }
+    if (windowEnd == pageCount - 2) {
+        ++windowEnd;  // same on the right side
+    }
+
+    commitPagerItems_.push_back({true, 1});
+    if (windowStart > 2) {
+        commitPagerItems_.push_back({false, 0});
+    }
+    for (int p = windowStart; p <= windowEnd; ++p) {
+        commitPagerItems_.push_back({true, p});
+    }
+    if (windowEnd < pageCount - 1) {
+        commitPagerItems_.push_back({false, 0});
+    }
+    commitPagerItems_.push_back({true, pageCount});
+}
+
+void MainWindow::SyncCommitPagerCombo() {
+    if (commitPagerComboControl_.hwnd() == nullptr || commitPageCount_ <= 0) {
+        return;
+    }
+    if (commitPagerComboControl_.GetCount() != static_cast<size_t>(commitPageCount_)) {
+        std::vector<darkui::ComboItem> pages;
+        pages.reserve(static_cast<size_t>(commitPageCount_));
+        for (int i = 1; i <= commitPageCount_; ++i) {
+            darkui::ComboItem item;
+            item.text = std::to_wstring(i);
+            pages.push_back(std::move(item));
+        }
+        commitPagerComboControl_.SetItems(pages);
+    }
+    commitPagerComboControl_.SetSelection(std::clamp(commitPage_, 0, commitPageCount_ - 1), false);
+}
+
+int MainWindow::HitTestCommitPagerItem(int x) const {
+    int cursor = 0;
+    for (size_t i = 0; i < commitPagerItems_.size(); ++i) {
+        const int width =
+            commitPagerItems_[i].isPage ? commitPagerButtonWidth_ : commitPagerEllipsisWidth_;
+        if (x >= cursor && x < cursor + width) {
+            return static_cast<int>(i);
+        }
+        cursor += width + kCommitPagerItemGap;
+    }
+    return -1;
+}
+
 void MainWindow::ShowCommitPlaceholder(const std::wstring& message) {
+    allCommits_.clear();
+    commitPageCount_ = 0;
+    commitPage_ = 0;
+    UpdateCommitPager();
     ListView_DeleteAllItems(commitList_);
 
     LVITEMW item{};

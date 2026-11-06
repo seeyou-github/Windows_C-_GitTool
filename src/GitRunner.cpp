@@ -351,10 +351,12 @@ GitCommandResult GitRunner::RunGitCommand(
 std::vector<CommitInfo> GitRunner::GetRecentCommits(const std::wstring& repoPath, int limit, HANDLE cancelEvent) {
     std::vector<CommitInfo> commits;
     const std::wstring format = L"%h%x1f%s%x1f%an%x1f%ad";
-    const GitCommandResult result = RunGitCommand(
-        repoPath,
-        {L"log", L"--date=short", L"--pretty=format:" + format, L"-n", std::to_wstring(limit)},
-        cancelEvent);
+    std::vector<std::wstring> args = {L"log", L"--date=short", L"--pretty=format:" + format};
+    if (limit > 0) {
+        args.push_back(L"-n");
+        args.push_back(std::to_wstring(limit));
+    }
+    const GitCommandResult result = RunGitCommand(repoPath, args, cancelEvent);
     if (!result.success) {
         return commits;
     }
