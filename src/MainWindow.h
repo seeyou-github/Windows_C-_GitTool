@@ -30,6 +30,8 @@ private:
                                                      UINT_PTR subclassId, DWORD_PTR refData);
     static LRESULT CALLBACK CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
                                                UINT_PTR subclassId, DWORD_PTR refData);
+    static LRESULT CALLBACK CommitSearchEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                                 UINT_PTR subclassId, DWORD_PTR refData);
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void CreateControls();
@@ -50,11 +52,16 @@ private:
     void PopulateCommitList(const std::vector<CommitInfo>& commits);
     void ApplyCommitPage();
     void SetCommitPage(int page);
+    void RefreshCommitDisplay();
+    void ExecuteCommitSearch();
+    void ToggleCommitSearch();
+    void SetCommitSearchVisible(bool visible);
     void UpdateCommitPager();
     void LayoutCommitPagerItems(int availWidth);
     void SyncCommitPagerCombo();
     int HitTestCommitPagerItem(int x) const;
     void ShowCommitPlaceholder(const std::wstring& message);
+    void ShowCommitPlaceholderRow(const std::wstring& message);
     void ClearLog();
     void AppendLog(const std::wstring& text);
     void AppendLogRichText(const std::wstring& text, COLORREF color);
@@ -174,6 +181,15 @@ private:
     darkui::ComboBox commitPagerComboControl_;
     HWND commitPagerCombo_ = nullptr;
     HWND commitPagerBar_ = nullptr;
+    darkui::Edit commitSearchEditControl_;
+    HWND commitSearchEdit_ = nullptr;
+    bool commitSearchVisible_ = false;
+    int commitSearchAnimHeight_ = 0;
+    int commitSearchAnimTarget_ = 0;
+    std::wstring commitSearchQuery_;
+    std::vector<CommitInfo> searchResults_;
+    bool commitSearchActive_ = false;
+    const std::vector<CommitInfo>* commitDisplayList_ = nullptr;
     struct CommitPagerItem {
         bool isPage = false;
         int page = 0;  // 1-based page number when isPage

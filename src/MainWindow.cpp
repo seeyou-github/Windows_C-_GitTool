@@ -18,6 +18,7 @@
 #include <memory>
 #include <sstream>
 #include <unordered_map>
+#include <cwctype>
 
 namespace {
 
@@ -41,6 +42,11 @@ constexpr UINT WM_APP_RENDER_DIFF_CONTENT = WM_APP + 6;
 constexpr UINT WM_APP_DIFF_ROWS_READY = WM_APP + 7;
 constexpr UINT WM_APP_DIFF_CONTENT_READY = WM_APP + 8;
 constexpr UINT_PTR kLogFlushTimerId = 1;
+constexpr UINT_PTR kCommitSearchAnimTimerId = 2;
+constexpr UINT_PTR kCommitSearchDebounceTimerId = 3;
+constexpr int kCommitSearchBarHeight = 34;
+constexpr int kCommitSearchAnimStep = 6;
+constexpr int kCommitSearchDebounceMs = 300;
 constexpr int kToolbarHeight = 58;
 constexpr int kPadding = 12;
 constexpr int kLeftPanelWidth = 380;
@@ -59,6 +65,7 @@ constexpr int kCommitPagerComboWidth = 96;
 constexpr UINT_PTR kPagerComboSubclassId = 101;
 constexpr UINT_PTR kPagerPopupSubclassId = 102;
 constexpr UINT_PTR kPagerBarSubclassId = 103;
+constexpr UINT_PTR kCommitSearchEditSubclassId = 104;
 HFONT g_menuFont = nullptr;
 constexpr COLORREF kMenuBackground = RGB(242, 242, 242);
 constexpr COLORREF kMenuHoverBackground = RGB(228, 228, 228);
@@ -300,6 +307,12 @@ bool TryParseGitProgressLine(const std::wstring& rawLine, int* percent, std::wst
     return true;
 }
 
+std::wstring LowercaseCopy(const std::wstring& value) {
+    std::wstring result = value;
+    std::transform(result.begin(), result.end(), result.begin(), towlower);
+    return result;
+}
+
 std::wstring Trim(const std::wstring& value) {
     const wchar_t* whitespace = L" \t\r\n";
     const size_t begin = value.find_first_not_of(whitespace);
@@ -477,12 +490,38 @@ HICON GetGitHubIcon() {
     return g_githubIcon;
 }
 
+std::unique_ptr<Gdiplus::Bitmap> g_searchBitmap;
+HICON g_searchIcon = nullptr;
+
+// Draws the toolbar search (magnifier) icon at runtime so it keeps the same
+// style and color as the toolbar text without needing an image resource.
+HICON GetSearchIcon() {
+    if (g_searchIcon == nullptr) {
+        auto bitmap = std::make_unique<Gdiplus::Bitmap>(32, 32, PixelFormat32bppARGB);
+        Gdiplus::Graphics graphics(bitmap.get());
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Pen pen(Gdiplus::Color(255, 210, 214, 220), 2.8f);
+        pen.SetStartCap(Gdiplus::LineCapRound);
+        pen.SetEndCap(Gdiplus::LineCapRound);
+        graphics.DrawEllipse(&pen, 5.5f, 5.5f, 13.0f, 13.0f);
+        graphics.DrawLine(&pen, 17.0f, 17.0f, 25.5f, 25.5f);
+        bitmap->GetHICON(&g_searchIcon);
+        g_searchBitmap = std::move(bitmap);
+    }
+    return g_searchIcon;
+}
+
 void ReleaseSharedGdiPlusResources() {
     if (g_githubIcon != nullptr) {
         DestroyIcon(g_githubIcon);
         g_githubIcon = nullptr;
     }
     g_githubBitmap.reset();
+    if (g_searchIcon != nullptr) {
+        DestroyIcon(g_searchIcon);
+        g_searchIcon = nullptr;
+    }
+    g_searchBitmap.reset();
 }
 
 COLORREF MapAnsiColor(int code, COLORREF fallback) {
@@ -4378,6 +4417,34 @@ LRESULT MainWindow::CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, L
     return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
+LRESULT MainWindow::CommitSearchEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                         UINT_PTR subclassId, DWORD_PTR refData) {
+    auto* self = reinterpret_cast<MainWindow*>(refData);
+    if (self != nullptr) {
+        switch (message) {
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) {
+                self->SetCommitSearchVisible(false);
+                return 0;
+            }
+            if (wParam == VK_RETURN) {
+                KillTimer(self->hwnd_, kCommitSearchDebounceTimerId);
+                self->ExecuteCommitSearch();
+                return 0;
+            }
+            break;
+        case WM_CHAR:
+            if (wParam == L'\r' || wParam == L'\n') {
+                return 0;  // suppress the default beep when pressing Enter
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
 LRESULT MainWindow::CommitPagerComboProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
                                          UINT_PTR subclassId, DWORD_PTR refData) {
     auto* self = reinterpret_cast<MainWindow*>(refData);
@@ -4662,6 +4729,33 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             FlushPendingCommandOutput();
             return 0;
         }
+        if (wParam == kCommitSearchDebounceTimerId) {
+            KillTimer(hwnd_, kCommitSearchDebounceTimerId);
+            ExecuteCommitSearch();
+            return 0;
+        }
+        if (wParam == kCommitSearchAnimTimerId) {
+            if (commitSearchAnimHeight_ < commitSearchAnimTarget_) {
+                commitSearchAnimHeight_ =
+                    std::min(commitSearchAnimTarget_, commitSearchAnimHeight_ + kCommitSearchAnimStep);
+            } else if (commitSearchAnimHeight_ > commitSearchAnimTarget_) {
+                commitSearchAnimHeight_ =
+                    std::max(commitSearchAnimTarget_, commitSearchAnimHeight_ - kCommitSearchAnimStep);
+            }
+            RECT rect{};
+            GetClientRect(hwnd_, &rect);
+            LayoutControls(rect.right - rect.left, rect.bottom - rect.top);
+            if (commitSearchAnimHeight_ == commitSearchAnimTarget_) {
+                KillTimer(hwnd_, kCommitSearchAnimTimerId);
+                if (commitSearchAnimTarget_ == 0) {
+                    commitSearchVisible_ = false;
+                    if (commitSearchEdit_ != nullptr) {
+                        ShowWindow(commitSearchEdit_, SW_HIDE);
+                    }
+                }
+            }
+            return 0;
+        }
         break;
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
@@ -4757,6 +4851,15 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 if (selected >= 0) {
                     SetCommitPage(selected);
                 }
+            }
+            return 0;
+        case IDC_BTN_SEARCH:
+            ToggleCommitSearch();
+            return 0;
+        case IDC_EDIT_COMMIT_SEARCH:
+            if (HIWORD(wParam) == EN_CHANGE) {
+                KillTimer(hwnd_, kCommitSearchDebounceTimerId);
+                SetTimer(hwnd_, kCommitSearchDebounceTimerId, kCommitSearchDebounceMs, nullptr);
             }
             return 0;
         case IDC_BTN_COMMIT:
@@ -5029,6 +5132,16 @@ void MainWindow::CreateControls() {
         SetWindowSubclass(commitPagerComboControl_.popup_list(), MainWindow::CommitPagerPopupListProc,
                           kPagerPopupSubclassId, reinterpret_cast<DWORD_PTR>(this));
     }
+    commitSearchEditControl_.Create(hwnd_, IDC_EDIT_COMMIT_SEARCH, L"", BuildDarkUiTheme(),
+                                    WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL);
+    commitSearchEdit_ = commitSearchEditControl_.hwnd();
+    commitSearchEditControl_.SetCueBanner(L"Search commits (id / author / date / message)");
+    commitSearchEditControl_.SetCornerRadius(6);
+    if (commitSearchEditControl_.edit_hwnd() != nullptr) {
+        SetWindowSubclass(commitSearchEditControl_.edit_hwnd(), MainWindow::CommitSearchEditProc,
+                          kCommitSearchEditSubclassId, reinterpret_cast<DWORD_PTR>(this));
+    }
+    ShowWindow(commitSearchEdit_, SW_HIDE);
 
     ListView_SetExtendedListViewStyle(projectList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     ListView_SetExtendedListViewStyle(commitList_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -5211,6 +5324,13 @@ void MainWindow::RefreshCommandToolbar(bool running) {
     githubItem.alignRight = true;
     githubItem.iconOnly = true;
     items.push_back(githubItem);
+    darkui::ToolbarItem searchItem;
+    searchItem.text = L"Search";
+    searchItem.commandId = IDC_BTN_SEARCH;
+    searchItem.icon = GetSearchIcon();
+    searchItem.alignRight = true;
+    searchItem.iconOnly = true;
+    items.push_back(searchItem);
     commandToolbarControl_.SetItems(items);
 }
 
@@ -5296,8 +5416,14 @@ void MainWindow::LayoutControls(int width, int height) {
 
     const bool pagerVisible = commitPageCount_ >= 1;
     const int pagerStrip = pagerVisible ? (kCommitPagerHeight + kCommitPagerGap) : 0;
-    MoveWindow(commitList_, rightX, contentTop, rightWidth, paneHeight - pagerStrip, TRUE);
+    const int searchStrip =
+        commitSearchVisible_ ? (commitSearchAnimHeight_ + kCommitPagerGap) : 0;
+    MoveWindow(commitList_, rightX, contentTop + searchStrip, rightWidth,
+               paneHeight - pagerStrip - searchStrip, TRUE);
     UpdateCommitListColumnWidths(rightWidth);
+    if (commitSearchVisible_ && commitSearchEdit_ != nullptr) {
+        MoveWindow(commitSearchEdit_, rightX, contentTop, rightWidth, commitSearchAnimHeight_, TRUE);
+    }
     if (pagerVisible && commitPagerBar_ != nullptr) {
         const int pagerTop = contentTop + paneHeight - kCommitPagerHeight;
         LayoutCommitPagerItems(rightWidth);
@@ -5567,7 +5693,17 @@ void MainWindow::CancelCommitRefresh() {
 
 void MainWindow::PopulateCommitList(const std::vector<CommitInfo>& commits) {
     allCommits_ = commits;
-    commitPageCount_ = static_cast<int>((allCommits_.size() + kCommitPageSize - 1) / kCommitPageSize);
+    if (commitSearchActive_) {
+        ExecuteCommitSearch();  // re-run the current query against the fresh list
+    } else {
+        RefreshCommitDisplay();
+    }
+}
+
+void MainWindow::RefreshCommitDisplay() {
+    commitDisplayList_ = commitSearchActive_ ? &searchResults_ : &allCommits_;
+    const size_t total = commitDisplayList_->size();
+    commitPageCount_ = static_cast<int>((total + kCommitPageSize - 1) / kCommitPageSize);
     if (commitPage_ >= commitPageCount_) {
         commitPage_ = std::max(0, commitPageCount_ - 1);
     }
@@ -5575,19 +5711,86 @@ void MainWindow::PopulateCommitList(const std::vector<CommitInfo>& commits) {
     ApplyCommitPage();
 }
 
+void MainWindow::ExecuteCommitSearch() {
+    if (commitSearchEditControl_.hwnd() == nullptr) {
+        return;
+    }
+    const std::wstring query = Trim(commitSearchEditControl_.GetText());
+    commitSearchQuery_ = query;
+    searchResults_.clear();
+    if (!query.empty()) {
+        const std::wstring needle = LowercaseCopy(query);
+        auto matches = [&needle](const std::wstring& text) {
+            return LowercaseCopy(text).find(needle) != std::wstring::npos;
+        };
+        for (const CommitInfo& commit : allCommits_) {
+            if (matches(commit.hash) || matches(commit.author) ||
+                matches(commit.date) || matches(commit.message)) {
+                searchResults_.push_back(commit);
+            }
+        }
+    }
+    commitSearchActive_ = !query.empty();
+    commitPage_ = 0;
+    RefreshCommitDisplay();
+}
+
+void MainWindow::ToggleCommitSearch() {
+    SetCommitSearchVisible(commitSearchEdit_ != nullptr && !commitSearchVisible_);
+}
+
+void MainWindow::SetCommitSearchVisible(bool visible) {
+    if (commitSearchEdit_ == nullptr) {
+        return;
+    }
+    if (visible) {
+        commitSearchVisible_ = true;
+        if (commitSearchAnimHeight_ == 0) {
+            ShowWindow(commitSearchEdit_, SW_SHOW);
+        }
+        commitSearchAnimTarget_ = kCommitSearchBarHeight;
+        SetTimer(hwnd_, kCommitSearchAnimTimerId, 16, nullptr);
+        if (commitSearchEditControl_.edit_hwnd() != nullptr) {
+            SetFocus(commitSearchEditControl_.edit_hwnd());
+        }
+        return;
+    }
+    // Closing: restore the full commit list right away so it slides back in
+    // underneath the collapsing search box.
+    KillTimer(hwnd_, kCommitSearchDebounceTimerId);
+    commitSearchQuery_.clear();
+    searchResults_.clear();
+    commitSearchActive_ = false;
+    commitPage_ = 0;
+    if (commitSearchEditControl_.hwnd() != nullptr) {
+        commitSearchEditControl_.SetText(L"");
+    }
+    if (commitSearchEditControl_.edit_hwnd() != nullptr) {
+        SetFocus(hwnd_);
+    }
+    commitSearchAnimTarget_ = 0;
+    SetTimer(hwnd_, kCommitSearchAnimTimerId, 16, nullptr);
+    RefreshCommitDisplay();
+}
+
 void MainWindow::ApplyCommitPage() {
     ListView_DeleteAllItems(commitList_);
+    const std::vector<CommitInfo>* display =
+        commitDisplayList_ != nullptr ? commitDisplayList_ : &allCommits_;
     const size_t start = static_cast<size_t>(std::max(0, commitPage_)) * kCommitPageSize;
-    const size_t end = std::min(start + static_cast<size_t>(kCommitPageSize), allCommits_.size());
+    const size_t end = std::min(start + static_cast<size_t>(kCommitPageSize), display->size());
     for (size_t i = start; i < end; ++i) {
         const int row = static_cast<int>(i - start);
         LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = row;
-        item.pszText = const_cast<LPWSTR>(allCommits_[i].hash.c_str());
+        item.pszText = const_cast<LPWSTR>((*display)[i].hash.c_str());
         ListView_InsertItem(commitList_, &item);
-        ListView_SetItemText(commitList_, row, 1, const_cast<LPWSTR>(allCommits_[i].message.c_str()));
-        ListView_SetItemText(commitList_, row, 2, const_cast<LPWSTR>(allCommits_[i].date.c_str()));
+        ListView_SetItemText(commitList_, row, 1, const_cast<LPWSTR>((*display)[i].message.c_str()));
+        ListView_SetItemText(commitList_, row, 2, const_cast<LPWSTR>((*display)[i].date.c_str()));
+    }
+    if (display->empty() && commitSearchActive_) {
+        ShowCommitPlaceholderRow(L"No matching commits");
     }
 }
 
@@ -5732,9 +5935,28 @@ int MainWindow::HitTestCommitPagerItem(int x) const {
 
 void MainWindow::ShowCommitPlaceholder(const std::wstring& message) {
     allCommits_.clear();
+    searchResults_.clear();
+    commitSearchActive_ = false;
+    commitSearchQuery_.clear();
+    commitDisplayList_ = &allCommits_;
+    KillTimer(hwnd_, kCommitSearchDebounceTimerId);
     commitPageCount_ = 0;
     commitPage_ = 0;
     UpdateCommitPager();
+    ListView_DeleteAllItems(commitList_);
+
+    LVITEMW item{};
+    item.mask = LVIF_TEXT;
+    item.iItem = 0;
+    std::wstring dash = L"-";
+    item.pszText = dash.data();
+    ListView_InsertItem(commitList_, &item);
+
+    std::wstring text = message;
+    ListView_SetItemText(commitList_, 0, 1, text.data());
+}
+
+void MainWindow::ShowCommitPlaceholderRow(const std::wstring& message) {
     ListView_DeleteAllItems(commitList_);
 
     LVITEMW item{};
