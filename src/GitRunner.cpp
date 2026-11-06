@@ -199,6 +199,55 @@ std::wstring TrimText(const std::wstring& value) {
     return value.substr(begin, end - begin + 1);
 }
 
+// Parses git log output produced with the format
+//   %h%x1f%H%x1f%s%x1f%an%x1f%ad%x1f%b%x01
+// Records are separated by 0x01 so the multi-line commit body stays intact.
+void ParseCommitLogOutput(const std::wstring& output, std::vector<CommitInfo>* commits) {
+    const std::wstring text = StripAnsiEscapes(output);
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t recordEnd = text.find(L'\x01', pos);
+        if (recordEnd == std::wstring::npos) {
+            break;
+        }
+        std::wstring record = text.substr(pos, recordEnd - pos);
+        pos = recordEnd + 1;
+        while (!record.empty() && (record.front() == L'\n' || record.front() == L'\r')) {
+            record.erase(record.begin());
+        }
+
+        std::vector<std::wstring> fields;
+        size_t fieldPos = 0;
+        while (true) {
+            const size_t fieldEnd = record.find(L'\x1f', fieldPos);
+            if (fieldEnd == std::wstring::npos) {
+                fields.push_back(record.substr(fieldPos));
+                break;
+            }
+            fields.push_back(record.substr(fieldPos, fieldEnd - fieldPos));
+            fieldPos = fieldEnd + 1;
+        }
+        if (fields.size() < 5 || (fields[0].empty() && fields[1].empty())) {
+            continue;
+        }
+
+        CommitInfo info;
+        info.hash = fields[0];
+        info.fullHash = fields[1];
+        info.message = fields[2];
+        info.author = fields[3];
+        info.date = fields[4];
+        if (fields.size() > 5) {
+            info.body = fields[5];
+            while (!info.body.empty() &&
+                   (info.body.back() == L'\n' || info.body.back() == L'\r')) {
+                info.body.pop_back();
+            }
+        }
+        commits->push_back(std::move(info));
+    }
+}
+
 }  // namespace
 
 bool GitRunner::IsGitRepository(const std::wstring& repoPath) {
@@ -350,8 +399,10 @@ GitCommandResult GitRunner::RunGitCommand(
 
 std::vector<CommitInfo> GitRunner::GetRecentCommits(const std::wstring& repoPath, int limit, HANDLE cancelEvent) {
     std::vector<CommitInfo> commits;
-    const std::wstring format = L"%h%x1f%s%x1f%an%x1f%ad";
-    std::vector<std::wstring> args = {L"log", L"--date=short", L"--pretty=format:" + format};
+    std::vector<std::wstring> args = {
+        L"log",
+        L"--date=format-local:%Y-%m-%d %H:%M:%S",
+        L"--pretty=format:%h%x1f%H%x1f%s%x1f%an%x1f%ad%x1f%b%x01"};
     if (limit > 0) {
         args.push_back(L"-n");
         args.push_back(std::to_wstring(limit));
@@ -361,33 +412,18 @@ std::vector<CommitInfo> GitRunner::GetRecentCommits(const std::wstring& repoPath
         return commits;
     }
 
-    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
-        if (line.empty()) {
-            continue;
-        }
-        size_t first = line.find(L'\x001f');
-        size_t second = first == std::wstring::npos ? std::wstring::npos : line.find(L'\x001f', first + 1);
-        size_t third = second == std::wstring::npos ? std::wstring::npos : line.find(L'\x001f', second + 1);
-        if (first == std::wstring::npos || second == std::wstring::npos || third == std::wstring::npos) {
-            continue;
-        }
-
-        CommitInfo info;
-        info.hash = line.substr(0, first);
-        info.message = line.substr(first + 1, second - first - 1);
-        info.author = line.substr(second + 1, third - second - 1);
-        info.date = line.substr(third + 1);
-        commits.push_back(info);
-    }
-
+    ParseCommitLogOutput(result.output, &commits);
     return commits;
 }
 
 std::vector<CommitInfo> GitRunner::GetUnpushedCommits(const std::wstring& repoPath, int limit) {
     std::vector<CommitInfo> commits;
-    const std::wstring format = L"%h%x1f%s%x1f%an%x1f%ad";
     std::vector<std::wstring> args = {
-        L"log", L"--date=short", L"--pretty=format:" + format, L"-n", std::to_wstring(limit)
+        L"log",
+        L"--date=format-local:%Y-%m-%d %H:%M:%S",
+        L"--pretty=format:%h%x1f%H%x1f%s%x1f%an%x1f%ad%x1f%b%x01",
+        L"-n",
+        std::to_wstring(limit)
     };
 
     const GitCommandResult upstreamResult = RunGitCommand(repoPath, {L"rev-parse", L"--abbrev-ref", L"@{upstream}"});
@@ -400,25 +436,7 @@ std::vector<CommitInfo> GitRunner::GetUnpushedCommits(const std::wstring& repoPa
         return commits;
     }
 
-    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
-        if (line.empty()) {
-            continue;
-        }
-        size_t first = line.find(L'\x001f');
-        size_t second = first == std::wstring::npos ? std::wstring::npos : line.find(L'\x001f', first + 1);
-        size_t third = second == std::wstring::npos ? std::wstring::npos : line.find(L'\x001f', second + 1);
-        if (first == std::wstring::npos || second == std::wstring::npos || third == std::wstring::npos) {
-            continue;
-        }
-
-        CommitInfo info;
-        info.hash = line.substr(0, first);
-        info.message = line.substr(first + 1, second - first - 1);
-        info.author = line.substr(second + 1, third - second - 1);
-        info.date = line.substr(third + 1);
-        commits.push_back(info);
-    }
-
+    ParseCommitLogOutput(result.output, &commits);
     return commits;
 }
 

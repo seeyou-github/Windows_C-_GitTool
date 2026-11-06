@@ -5471,7 +5471,7 @@ void MainWindow::UpdateCommitListColumnWidths(int listWidth) {
 
     const int safeWidth = std::max(320, listWidth - 4);
     const int hashWidth = 110;
-    const int dateWidth = 150;
+    const int dateWidth = 210;
     const int messageWidth = std::max(180, safeWidth - hashWidth - dateWidth - 24);
 
     ListView_SetColumnWidth(commitList_, 0, hashWidth);
@@ -5724,8 +5724,9 @@ void MainWindow::ExecuteCommitSearch() {
             return LowercaseCopy(text).find(needle) != std::wstring::npos;
         };
         for (const CommitInfo& commit : allCommits_) {
-            if (matches(commit.hash) || matches(commit.author) ||
-                matches(commit.date) || matches(commit.message)) {
+            if (matches(commit.hash) || matches(commit.fullHash) ||
+                matches(commit.author) || matches(commit.date) ||
+                matches(commit.message) || matches(commit.body)) {
                 searchResults_.push_back(commit);
             }
         }

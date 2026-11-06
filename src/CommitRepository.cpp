@@ -36,7 +36,9 @@ bool CommitRepository::AreCommitListsEqual(
 
     for (size_t i = 0; i < left.size(); ++i) {
         if (left[i].hash != right[i].hash ||
+            left[i].fullHash != right[i].fullHash ||
             left[i].message != right[i].message ||
+            left[i].body != right[i].body ||
             left[i].author != right[i].author ||
             left[i].date != right[i].date) {
             return false;

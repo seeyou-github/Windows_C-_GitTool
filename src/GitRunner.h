@@ -16,8 +16,10 @@ struct GitCommandResult {
 };
 
 struct CommitInfo {
-    std::wstring hash;
-    std::wstring message;
+    std::wstring hash;      // abbreviated hash shown in the list
+    std::wstring fullHash;  // 40-char hash, used for search
+    std::wstring message;   // subject line
+    std::wstring body;      // full commit message body (multi-line), used for search
     std::wstring author;
     std::wstring date;
 };

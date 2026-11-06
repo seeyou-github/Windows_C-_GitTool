@@ -6,7 +6,7 @@
 namespace {
 
 constexpr unsigned int kMagic = 0x31424347;  // GCB1
-constexpr unsigned int kVersion = 1;
+constexpr unsigned int kVersion = 2;
 
 std::string WideToUtf8(const std::wstring& text) {
     if (text.empty()) {
@@ -59,14 +59,18 @@ bool ReadWideString(std::ifstream& input, std::wstring* value) {
 
 void WriteCommitInfo(std::ofstream& output, const CommitInfo& info) {
     WriteWideString(output, info.hash);
+    WriteWideString(output, info.fullHash);
     WriteWideString(output, info.message);
+    WriteWideString(output, info.body);
     WriteWideString(output, info.author);
     WriteWideString(output, info.date);
 }
 
 bool ReadCommitInfo(std::ifstream& input, CommitInfo* info) {
     return ReadWideString(input, &info->hash) &&
+           ReadWideString(input, &info->fullHash) &&
            ReadWideString(input, &info->message) &&
+           ReadWideString(input, &info->body) &&
            ReadWideString(input, &info->author) &&
            ReadWideString(input, &info->date);
 }
