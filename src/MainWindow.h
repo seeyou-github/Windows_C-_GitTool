@@ -47,7 +47,9 @@ private:
     void ApplyFonts();
     void LoadProjectsIntoList();
     void RefreshCurrentRepository();
-    void RefreshCommitList();
+    // limit: 0 = 仅读第一页, >0 = 读取指定条数, -1 = 全部读取
+    // pageAfterLoad: -1 = 不跳页, >=0 = 跳到该页(0-based), -2 = 跳到最后一页
+    void RefreshCommitList(int limit = 0, int pageAfterLoad = -1);
     void CancelCommitRefresh();
     void PopulateCommitList(const std::vector<CommitInfo>& commits);
     void ApplyCommitPage();
@@ -57,6 +59,7 @@ private:
     void ToggleCommitSearch();
     void SetCommitSearchVisible(bool visible);
     void UpdateCommitPager();
+    void SetCommitPagerLastLoading(bool loading);
     void LayoutCommitPagerItems(int availWidth);
     void SyncCommitPagerCombo();
     int HitTestCommitPagerItem(int x) const;
@@ -192,13 +195,15 @@ private:
     const std::vector<CommitInfo>* commitDisplayList_ = nullptr;
     struct CommitPagerItem {
         bool isPage = false;
-        int page = 0;  // 1-based page number when isPage
+        int page = 0;     // 1-based page number when isPage
+        int action = 0;   // 1 = 下一页, 2 = 尾页 (when !isPage && action != 0)
     };
     std::vector<CommitPagerItem> commitPagerItems_;
     int commitPagerAvailWidth_ = 0;
     int commitPagerBarWidth_ = 0;
     int commitPagerButtonWidth_ = 44;
     int commitPagerEllipsisWidth_ = 24;
+    int commitPagerActionWidth_ = 52;
     bool commitPagerCompressed_ = false;
     int pagerHoverIndex_ = -1;
     bool pagerBarTracking_ = false;
@@ -233,6 +238,8 @@ private:
     unsigned long long commitRefreshToken_ = 0;
     std::vector<CommitInfo> allCommits_;
     std::wstring commitListRepoPath_;
+    bool commitListFullyLoaded_ = false;  // 已读取到仓库末尾（或点过尾页全量读取）
+    bool commitPagerLastLoading_ = false;  // 「尾页」全量读取进行中，按钮显示读取动画
     int commitPage_ = 0;
     int commitPageCount_ = 0;
     std::wstring currentProjectPath_;

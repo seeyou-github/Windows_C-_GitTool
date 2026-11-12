@@ -44,6 +44,9 @@ constexpr UINT WM_APP_DIFF_CONTENT_READY = WM_APP + 8;
 constexpr UINT_PTR kLogFlushTimerId = 1;
 constexpr UINT_PTR kCommitSearchAnimTimerId = 2;
 constexpr UINT_PTR kCommitSearchDebounceTimerId = 3;
+constexpr UINT_PTR kCommitPagerLoadingTimerId = 4;
+constexpr int kCommitPagerLoadingTimerMs = 80;
+constexpr int kCommitPagerSpinnerLeft = 28;
 constexpr int kCommitSearchBarHeight = 34;
 constexpr int kCommitSearchAnimStep = 6;
 constexpr int kCommitSearchDebounceMs = 300;
@@ -58,6 +61,9 @@ constexpr int kStatusBarHeight = 32;
 constexpr size_t kMaxLogChars = 200000;
 constexpr size_t kLogTrimTargetChars = 150000;
 constexpr int kCommitPageSize = 50;
+constexpr int kPagerActionNext = 1;
+constexpr int kPagerActionLast = 2;
+constexpr int kCommitPageToLast = -2;
 constexpr int kCommitPagerHeight = 30;
 constexpr int kCommitPagerGap = 4;
 constexpr int kCommitPagerItemGap = 6;
@@ -784,6 +790,7 @@ struct AsyncCommitRefreshState {
     HWND hwnd = nullptr;
     std::wstring repoPath;
     int limit = 50;
+    int pageAfterLoad = -1;
     unsigned long long token = 0;
     HANDLE cancelEvent = nullptr;
     std::vector<CommitInfo> previousCommits;
@@ -4330,18 +4337,25 @@ LRESULT MainWindow::CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, L
         int x = 0;
         for (int i = 0; i < static_cast<int>(self->commitPagerItems_.size()); ++i) {
             const CommitPagerItem& item = self->commitPagerItems_[i];
-            const int width = item.isPage ? self->commitPagerButtonWidth_
-                                          : self->commitPagerEllipsisWidth_;
+            const int width = item.isPage
+                                  ? self->commitPagerButtonWidth_
+                                  : (item.action != 0 ? self->commitPagerActionWidth_
+                                                      : self->commitPagerEllipsisWidth_);
             RECT itemRect{x, itemTop, x + width, itemBottom};
             if (itemRect.right > client.right) {
                 break;  // clip items that no longer fit
             }
-            if (item.isPage) {
-                const bool current = item.page == self->commitPage_ + 1;
+            if (item.isPage || item.action != 0) {
+                const bool spinning =
+                    item.action == kPagerActionLast && self->commitPagerLastLoading_;
+                const bool current = item.isPage && item.page == self->commitPage_ + 1;
                 const bool hover = i == self->pagerHoverIndex_;
-                const COLORREF fill = current ? currentFill : (hover ? hoverFill : normalFill);
-                const COLORREF border = current ? currentBorder : (hover ? hoverBorder : normalBorder);
-                const COLORREF text = current ? currentText : (hover ? hoverText : normalText);
+                const COLORREF fill = spinning ? RGB(70, 78, 92)
+                    : (current ? currentFill : (hover ? hoverFill : normalFill));
+                const COLORREF border = spinning ? currentBorder
+                    : (current ? currentBorder : (hover ? hoverBorder : normalBorder));
+                const COLORREF text = spinning ? hoverText
+                    : (current ? currentText : (hover ? hoverText : normalText));
                 HBRUSH brush = CreateSolidBrush(fill);
                 HPEN pen = CreatePen(PS_SOLID, 1, border);
                 HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, brush));
@@ -4351,10 +4365,41 @@ LRESULT MainWindow::CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, L
                 SelectObject(dc, oldPen);
                 DeleteObject(brush);
                 DeleteObject(pen);
-                SetTextColor(dc, text);
-                const std::wstring label = std::to_wstring(item.page);
-                DrawTextW(dc, label.c_str(), static_cast<int>(label.size()), &itemRect,
-                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                if (spinning) {
+                    // 8 个点绕圈，亮头按时间顺时针移动（一圈约 640ms，无需逐帧状态）
+                    static const POINT kSpinnerOffsets[] = {
+                        {0, -7}, {5, -5}, {7, 0}, {5, 5},
+                        {0, 7}, {-5, 5}, {-7, 0}, {-5, -5}
+                    };
+                    constexpr int kSpinnerDots = 8;
+                    const int frame = static_cast<int>(
+                        (GetTickCount64() / kCommitPagerLoadingTimerMs) % kSpinnerDots);
+                    const int cx = itemRect.left + 15;
+                    const int cy = (itemRect.top + itemRect.bottom) / 2;
+                    for (int d = 0; d < kSpinnerDots; ++d) {
+                        const int age = (frame - d + kSpinnerDots) % kSpinnerDots;
+                        const int shade = 235 - age * 24;
+                        HBRUSH dotBrush = CreateSolidBrush(RGB(shade, shade + 2, shade + 6));
+                        HBRUSH oldDotBrush = static_cast<HBRUSH>(SelectObject(dc, dotBrush));
+                        const int px = cx + kSpinnerOffsets[d].x;
+                        const int py = cy + kSpinnerOffsets[d].y;
+                        Ellipse(dc, px - 2, py - 2, px + 2, py + 2);
+                        SelectObject(dc, oldDotBrush);
+                        DeleteObject(dotBrush);
+                    }
+                    RECT textRect = itemRect;
+                    textRect.left += kCommitPagerSpinnerLeft;
+                    SetTextColor(dc, text);
+                    DrawTextW(dc, L"读取中", 3, &textRect,
+                              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                } else {
+                    SetTextColor(dc, text);
+                    const std::wstring label =
+                        item.isPage ? std::to_wstring(item.page)
+                                    : (item.action == kPagerActionNext ? L"下一页" : L"尾页");
+                    DrawTextW(dc, label.c_str(), static_cast<int>(label.size()), &itemRect,
+                              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
             } else {
                 SetTextColor(dc, mutedText);
                 DrawTextW(dc, L"…", 1, &itemRect,
@@ -4370,9 +4415,23 @@ LRESULT MainWindow::CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, L
     case WM_LBUTTONDOWN: {
         SetFocus(hwnd);
         const int index = self->HitTestCommitPagerItem(GET_X_LPARAM(lParam));
-        if (index >= 0 && index < static_cast<int>(self->commitPagerItems_.size()) &&
-            self->commitPagerItems_[index].isPage) {
-            self->SetCommitPage(self->commitPagerItems_[index].page - 1);
+        if (index >= 0 && index < static_cast<int>(self->commitPagerItems_.size())) {
+            // 取副本：后续刷新会重建 commitPagerItems_，不能持有其引用
+            const CommitPagerItem item = self->commitPagerItems_[index];
+            if (item.isPage) {
+                self->SetCommitPage(item.page - 1);
+            } else if (item.action == kPagerActionNext) {
+                // 只多读一页，加载完成后跳到新读出来的那一页
+                if (!self->commitPagerLastLoading_) {
+                    const int nextPage = std::max(1, self->commitPageCount_);
+                    self->RefreshCommitList((nextPage + 1) * kCommitPageSize, nextPage);
+                }
+            } else if (item.action == kPagerActionLast) {
+                // 尾页：全部读取并跳到最后一页；读取期间按钮显示动画且不接受重复点击
+                if (!self->commitPagerLastLoading_) {
+                    self->RefreshCommitList(-1, kCommitPageToLast);
+                }
+            }
         }
         return 0;
     }
@@ -4380,7 +4439,8 @@ LRESULT MainWindow::CommitPagerBarProc(HWND hwnd, UINT message, WPARAM wParam, L
         const int index = self->HitTestCommitPagerItem(GET_X_LPARAM(lParam));
         const bool hoverable = index >= 0 &&
                                index < static_cast<int>(self->commitPagerItems_.size()) &&
-                               self->commitPagerItems_[index].isPage;
+                               (self->commitPagerItems_[index].isPage ||
+                                self->commitPagerItems_[index].action != 0);
         const int newHover = hoverable ? index : -1;
         if (newHover != self->pagerHoverIndex_) {
             self->pagerHoverIndex_ = newHover;
@@ -4631,6 +4691,25 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 if (!CommitRepository::AreCommitListsEqual(state->previousCommits, state->commits)) {
                     PopulateCommitList(state->commits);
                 }
+                // 读取量少于请求量说明已经到仓库末尾；全量读取同样视为已读完
+                commitListFullyLoaded_ =
+                    state->limit < 0 ||
+                    (state->limit > 0 &&
+                     state->commits.size() < static_cast<size_t>(state->limit));
+                int targetPage = -1;
+                if (state->pageAfterLoad == kCommitPageToLast) {
+                    targetPage = commitPageCount_ > 0 ? commitPageCount_ - 1 : -1;
+                } else if (state->pageAfterLoad >= 0) {
+                    targetPage = std::min(state->pageAfterLoad,
+                                          std::max(0, commitPageCount_ - 1));
+                }
+                if (targetPage >= 0) {
+                    SetCommitPage(targetPage);
+                }
+                UpdateCommitPager();  // 重排并重绘「下一页 / 尾页」按钮
+            }
+            if (state->token == commitRefreshToken_) {
+                SetCommitPagerLastLoading(false);  // 本次读取结束，收起按钮上的读取动画
             }
             delete state;
         }
@@ -4753,6 +4832,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                         ShowWindow(commitSearchEdit_, SW_HIDE);
                     }
                 }
+            }
+            return 0;
+        }
+        if (wParam == kCommitPagerLoadingTimerId) {
+            if (!commitPagerLastLoading_) {
+                KillTimer(hwnd_, kCommitPagerLoadingTimerId);
+            } else if (commitPagerBar_ != nullptr) {
+                InvalidateRect(commitPagerBar_, nullptr, FALSE);
             }
             return 0;
         }
@@ -5614,7 +5701,7 @@ void MainWindow::RefreshCurrentRepository() {
     RefreshCommitList();
 }
 
-void MainWindow::RefreshCommitList() {
+void MainWindow::RefreshCommitList(int limit, int pageAfterLoad) {
     const std::wstring path = GetSelectedProjectPath();
     if (path.empty()) {
         ListView_DeleteAllItems(commitList_);
@@ -5626,19 +5713,32 @@ void MainWindow::RefreshCommitList() {
         return;
     }
 
+    // 进入仓库 / 常规刷新（status 等）一律只读第一页；只有点「下一页」「尾页」才增量或全量读取
     if (path != commitListRepoPath_) {
         commitListRepoPath_ = path;
+        limit = kCommitPageSize;
+        pageAfterLoad = 0;
+        commitListFullyLoaded_ = false;
+    } else if (limit == 0) {
+        limit = kCommitPageSize;
+        pageAfterLoad = 0;
+        // 是否还有更多交给本次读取结果判定，避免刷新时按钮闪现
+    }
+    if (pageAfterLoad == 0) {
         commitPage_ = 0;
     }
 
-    const auto cachedCommits = cacheDatabase_.GetCommitList(path, -1);
+    const auto cachedCommits = cacheDatabase_.GetCommitList(path, limit);
     if (!cachedCommits.empty()) {
         PopulateCommitList(cachedCommits);
     } else {
         ShowCommitPlaceholder(L"Loading commits...");
     }
 
-    if (currentCommitRefreshThread_ != nullptr &&
+    // 「下一页 / 尾页」是更大的读取请求，应取代仍在进行的第一页读取
+    const bool expandRequest = pageAfterLoad > 0 || pageAfterLoad == kCommitPageToLast;
+    if (!expandRequest &&
+        currentCommitRefreshThread_ != nullptr &&
         currentCommitRefreshCancelEvent_ != nullptr &&
         currentCommitRefreshPath_ == path &&
         WaitForSingleObject(currentCommitRefreshThread_, 0) == WAIT_TIMEOUT) {
@@ -5650,7 +5750,8 @@ void MainWindow::RefreshCommitList() {
     auto* state = new AsyncCommitRefreshState();
     state->hwnd = hwnd_;
     state->repoPath = path;
-    state->limit = -1;
+    state->limit = limit;
+    state->pageAfterLoad = pageAfterLoad;
     state->token = ++commitRefreshToken_;
     state->previousCommits = cachedCommits;
     state->cancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -5672,9 +5773,14 @@ void MainWindow::RefreshCommitList() {
         return;
     }
     currentCommitRefreshThread_ = thread;
+    if (pageAfterLoad == kCommitPageToLast) {
+        SetCommitPagerLastLoading(true);
+    }
 }
 
 void MainWindow::CancelCommitRefresh() {
+    // 旧请求一旦作废，按钮上的读取动画也要一起收起（包括命令发起时的取消）
+    SetCommitPagerLastLoading(false);
     const bool hadRefresh =
         currentCommitRefreshCancelEvent_ != nullptr || currentCommitRefreshThread_ != nullptr;
     if (currentCommitRefreshCancelEvent_ != nullptr) {
@@ -5826,6 +5932,23 @@ void MainWindow::UpdateCommitPager() {
     }
 }
 
+void MainWindow::SetCommitPagerLastLoading(bool loading) {
+    if (commitPagerLastLoading_ == loading) {
+        return;
+    }
+    commitPagerLastLoading_ = loading;
+    if (hwnd_ != nullptr) {
+        if (loading) {
+            SetTimer(hwnd_, kCommitPagerLoadingTimerId, kCommitPagerLoadingTimerMs, nullptr);
+        } else {
+            KillTimer(hwnd_, kCommitPagerLoadingTimerId);
+        }
+    }
+    if (commitPagerBar_ != nullptr) {
+        InvalidateRect(commitPagerBar_, nullptr, FALSE);
+    }
+}
+
 void MainWindow::LayoutCommitPagerItems(int availWidth) {
     commitPagerAvailWidth_ = availWidth;
     commitPagerItems_.clear();
@@ -5844,17 +5967,38 @@ void MainWindow::LayoutCommitPagerItems(int availWidth) {
     commitPagerButtonWidth_ = std::max(36, static_cast<int>(extent.cx) + 18);
     GetTextExtentPoint32W(dc, L"…", 1, &extent);
     commitPagerEllipsisWidth_ = std::max(22, static_cast<int>(extent.cx) + 14);
+    SIZE nextExtent{};
+    SIZE lastExtent{};
+    SIZE loadingExtent{};
+    GetTextExtentPoint32W(dc, L"下一页", 3, &nextExtent);
+    GetTextExtentPoint32W(dc, L"尾页", 2, &lastExtent);
+    GetTextExtentPoint32W(dc, L"读取中", 3, &loadingExtent);
+    const int actionLabelWidth =
+        std::max(static_cast<int>(nextExtent.cx),
+                 std::max(static_cast<int>(lastExtent.cx), static_cast<int>(loadingExtent.cx)));
+    // 尾页读取动画要在文字左侧画 spinner，统一预留出它的位置
+    commitPagerActionWidth_ = std::max(52, actionLabelWidth + 20 + kCommitPagerSpinnerLeft);
     if (oldFont != nullptr) {
         SelectObject(dc, oldFont);
     }
     ReleaseDC(commitPagerBar_, dc);
 
+    // 只读到第一页时，页码控件只列出「已读取页数」，右侧再挂「下一页」「尾页」
+    const bool showActions = !commitListFullyLoaded_ && !commitSearchActive_;
+    const int actionsWidth =
+        showActions ? 2 * (commitPagerActionWidth_ + kCommitPagerItemGap) : 0;
+
     const int allItemsWidth =
-        pageCount * (commitPagerButtonWidth_ + kCommitPagerItemGap) - kCommitPagerItemGap;
+        pageCount * (commitPagerButtonWidth_ + kCommitPagerItemGap) - kCommitPagerItemGap +
+        actionsWidth;
     if (allItemsWidth <= availWidth) {
         // Everything fits: show every page button and no dropdown.
         for (int p = 1; p <= pageCount; ++p) {
             commitPagerItems_.push_back({true, p});
+        }
+        if (showActions) {
+            commitPagerItems_.push_back({false, 0, kPagerActionNext});
+            commitPagerItems_.push_back({false, 0, kPagerActionLast});
         }
         commitPagerBarWidth_ = availWidth;
         return;
@@ -5866,7 +6010,7 @@ void MainWindow::LayoutCommitPagerItems(int availWidth) {
     commitPagerBarWidth_ = barAvail;
 
     const int fixedWidth = commitPagerButtonWidth_ * 2 + commitPagerEllipsisWidth_ * 2 +
-                           kCommitPagerItemGap * 4;
+                           actionsWidth + kCommitPagerItemGap * 4;
     int windowCount = (barAvail - fixedWidth + kCommitPagerItemGap) /
                       (commitPagerButtonWidth_ + kCommitPagerItemGap);
     windowCount = std::clamp(windowCount, 1, std::max(1, pageCount - 2));
@@ -5902,6 +6046,10 @@ void MainWindow::LayoutCommitPagerItems(int availWidth) {
         commitPagerItems_.push_back({false, 0});
     }
     commitPagerItems_.push_back({true, pageCount});
+    if (showActions) {
+        commitPagerItems_.push_back({false, 0, kPagerActionNext});
+        commitPagerItems_.push_back({false, 0, kPagerActionLast});
+    }
 }
 
 void MainWindow::SyncCommitPagerCombo() {
@@ -5924,8 +6072,11 @@ void MainWindow::SyncCommitPagerCombo() {
 int MainWindow::HitTestCommitPagerItem(int x) const {
     int cursor = 0;
     for (size_t i = 0; i < commitPagerItems_.size(); ++i) {
-        const int width =
-            commitPagerItems_[i].isPage ? commitPagerButtonWidth_ : commitPagerEllipsisWidth_;
+        const CommitPagerItem& item = commitPagerItems_[i];
+        const int width = item.isPage
+                              ? commitPagerButtonWidth_
+                              : (item.action != 0 ? commitPagerActionWidth_
+                                                  : commitPagerEllipsisWidth_);
         if (x >= cursor && x < cursor + width) {
             return static_cast<int>(i);
         }
