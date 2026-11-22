@@ -454,6 +454,45 @@ std::vector<std::wstring> GitRunner::GetLocalBranches(const std::wstring& repoPa
     return branches;
 }
 
+std::vector<std::wstring> GitRunner::GetUnpushedBranches(const std::wstring& repoPath) {
+    std::vector<std::wstring> branches;
+    // 一次拿到本地分支的 upstream 与 ahead/gone 状态，避免逐分支调用 git
+    const GitCommandResult result = RunGitCommand(
+        repoPath,
+        {L"for-each-ref",
+         L"--format=%(refname:short)%09%(upstream:short)%09%(upstream:track)",
+         L"refs/heads/"});
+    if (!result.success) {
+        return branches;
+    }
+    for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
+        if (line.empty()) {
+            continue;
+        }
+        const size_t firstTab = line.find(L'\t');
+        if (firstTab == std::wstring::npos) {
+            continue;
+        }
+        const size_t secondTab = line.find(L'\t', firstTab + 1);
+        if (secondTab == std::wstring::npos) {
+            continue;
+        }
+        const std::wstring name = line.substr(0, firstTab);
+        const std::wstring upstream = line.substr(firstTab + 1, secondTab - firstTab - 1);
+        const std::wstring track = line.substr(secondTab + 1);
+        if (name.empty()) {
+            continue;
+        }
+        const bool missingOriginUpstream = upstream.empty() || upstream.compare(0, 7, L"origin/") != 0;
+        const bool hasLocalOnlyCommits = track.find(L"ahead") != std::wstring::npos ||
+                                         track.find(L"gone") != std::wstring::npos;
+        if (missingOriginUpstream || hasLocalOnlyCommits) {
+            branches.push_back(name);
+        }
+    }
+    return branches;
+}
+
 std::wstring GitRunner::GetCurrentBranch(const std::wstring& repoPath) {
     const GitCommandResult result = RunGitCommand(repoPath, {L"branch", L"--show-current"});
     if (!result.success) {

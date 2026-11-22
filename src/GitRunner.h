@@ -60,6 +60,7 @@ public:
         int limit);
 
     static std::vector<std::wstring> GetLocalBranches(const std::wstring& repoPath);
+    static std::vector<std::wstring> GetUnpushedBranches(const std::wstring& repoPath);
     static std::wstring GetCurrentBranch(const std::wstring& repoPath);
     static std::wstring GetCommitDetails(const std::wstring& repoPath, const std::wstring& commitHash);
     static std::vector<CommitFileDiff> GetCommitFileDiffs(

@@ -973,6 +973,8 @@ struct DeleteBranchWindowState {
     HWND parent = nullptr;
     std::wstring selectedBranch;
     std::vector<std::wstring> branches;
+    std::wstring hintText = L"Select a local branch to delete";
+    std::wstring actionButtonText = L"Delete";
     darkui::Button deleteButtonControl;
     darkui::Button cancelButtonControl;
     HWND hintLabel = nullptr;
@@ -3563,12 +3565,12 @@ LRESULT CALLBACK DeleteBranchWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         DarkTheme::ApplyTitleBar(hwnd);
 
-        state->hintLabel = CreateWindowExW(0, L"STATIC", L"Select a local branch to delete",
+        state->hintLabel = CreateWindowExW(0, L"STATIC", state->hintText.c_str(),
                                            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, cs->hInstance, nullptr);
         state->branchList = CreateWindowExW(0, L"LISTBOX", L"",
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
                                             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(4601), cs->hInstance, nullptr);
-        state->deleteButtonControl.Create(hwnd, IDOK, L"Delete", BuildDarkUiTheme());
+        state->deleteButtonControl.Create(hwnd, IDOK, state->actionButtonText.c_str(), BuildDarkUiTheme());
         state->deleteButton = state->deleteButtonControl.hwnd();
         state->cancelButtonControl.Create(hwnd, IDCANCEL, L"Cancel", BuildDarkUiTheme());
         state->cancelButton = state->cancelButtonControl.hwnd();
@@ -5024,6 +5026,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         default:
             if (LOWORD(wParam) == IDM_BRANCH_CREATE ||
+                LOWORD(wParam) == IDM_BRANCH_PUSH_LOCAL ||
                 LOWORD(wParam) == IDM_BRANCH_RENAME ||
                 LOWORD(wParam) == IDM_BRANCH_SWITCH ||
                 LOWORD(wParam) == IDM_BRANCH_SQUASH ||
@@ -5446,6 +5449,7 @@ HMENU MainWindow::BuildBranchToolbarMenu(bool enabled) {
 
     UINT stateFlags = enabled ? MF_STRING : (MF_STRING | MF_GRAYED);
     AppendMenuW(menu, stateFlags, IDM_BRANCH_CREATE, L"+ Create Branch");
+    AppendMenuW(menu, stateFlags, IDM_BRANCH_PUSH_LOCAL, L"Push Local Branch");
     AppendMenuW(menu, stateFlags, IDM_BRANCH_RENAME, L"Rename Current Branch");
     AppendMenuW(menu, stateFlags, IDM_BRANCH_SWITCH, L"Switch Branch");
     AppendMenuW(menu, stateFlags, IDM_BRANCH_SQUASH, L"Squash Local Commits");
@@ -7114,6 +7118,68 @@ void MainWindow::RunDeleteBranch() {
     RunSimpleCommand({L"fetch", L"--prune", L"origin"}, true, L"", deletePreCommands);
 }
 
+void MainWindow::RunPushLocalBranch() {
+    const std::wstring path = GetSelectedProjectPath();
+    if (path.empty()) {
+        MessageBoxW(hwnd_, LoadStringResource(IDS_MSG_SELECT_REPO).c_str(),
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    std::vector<std::wstring> branches = GitRunner::GetUnpushedBranches(path);
+    if (branches.empty()) {
+        MessageBoxW(hwnd_, L"No local branches need to be pushed to origin.",
+                    LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONINFORMATION);
+        return;
+    }
+
+    auto* state = new DeleteBranchWindowState();
+    state->parent = hwnd_;
+    state->branches = std::move(branches);
+    state->hintText = L"Select a local branch to push to origin";
+    state->actionButtonText = L"Push";
+    state->uiFont = uiFont_;
+
+    RECT parentRect{};
+    GetWindowRect(hwnd_, &parentRect);
+    const int width = 520;
+    const int height = 380;
+    const int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    const int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+
+    EnableWindow(hwnd_, FALSE);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kDeleteBranchWindowClass,
+        L"Push Local Branch",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
+        x, y, width, height,
+        nullptr, nullptr, instance_, state);
+    if (dialog == nullptr) {
+        EnableWindow(hwnd_, TRUE);
+        delete state;
+        return;
+    }
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    const bool accepted = state->accepted;
+    const std::wstring branchName = state->selectedBranch;
+    delete state;
+
+    if (!accepted || branchName.empty()) {
+        return;
+    }
+
+    RunSimpleCommand({L"push", L"-u", L"origin", branchName}, true);
+}
+
 void MainWindow::ShowBranchMenu() {
     const std::wstring path = GetSelectedProjectPath();
     if (path.empty()) {
@@ -7132,6 +7198,7 @@ void MainWindow::ShowBranchMenu() {
     const std::wstring currentBranch = GitRunner::GetCurrentBranch(path);
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_CREATE, L"+ Create Branch");
+    AppendMenuW(menu, MF_STRING, IDM_BRANCH_PUSH_LOCAL, L"Push Local Branch");
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_RENAME, L"Rename Current Branch");
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_SQUASH, L"Squash Local Commits");
     AppendMenuW(menu, MF_STRING, IDM_BRANCH_DELETE, L"Delete Branch");
@@ -7201,6 +7268,11 @@ void MainWindow::HandleBranchMenuCommand(UINT commandId) {
         return;
     }
 
+    if (commandId == IDM_BRANCH_PUSH_LOCAL) {
+        RunPushLocalBranch();
+        return;
+    }
+
     if (commandId == IDM_BRANCH_RENAME) {
         const std::wstring currentBranch = GitRunner::GetCurrentBranch(GetSelectedProjectPath());
         bool accepted = false;
@@ -7214,7 +7286,9 @@ void MainWindow::HandleBranchMenuCommand(UINT commandId) {
                         LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
             return;
         }
-        RunSimpleCommand({L"branch", L"-m", branchName}, true);
+        // 重命名成功后推送到 origin，用 -u 重新建立 upstream 跟踪（旧名跟踪已失效）
+        RunSimpleCommand({L"push", L"-u", L"origin", branchName}, true, L"",
+                         {{L"branch", L"-m", branchName}});
         return;
     }
 

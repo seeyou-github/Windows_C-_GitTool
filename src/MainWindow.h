@@ -109,6 +109,7 @@ private:
         const std::wstring& initialValue,
         bool* accepted);
     void RunSquashLocalCommits();
+    void RunPushLocalBranch();
     void RunDeleteBranch();
     void ShowBranchMenu();
     void ShowBranchSwitchMenu();
