@@ -7101,7 +7101,17 @@ void MainWindow::RunDeleteBranch() {
         return;
     }
 
-    RunSimpleCommand({L"branch", L"-D", branchName}, true);
+    // 仅当远程跟踪引用存在时才推送删除，避免本地未推送过的分支因远程删除失败而卡住
+    std::vector<std::vector<std::wstring>> deletePreCommands;
+    const std::wstring remoteRef = L"origin/" + branchName;
+    const GitCommandResult remoteCheck =
+        GitRunner::RunGitCommand(path, {L"branch", L"-r", L"--list", remoteRef});
+    if (remoteCheck.success && !remoteCheck.output.empty()) {
+        deletePreCommands.push_back({L"push", L"origin", L"--delete", branchName});
+    }
+    deletePreCommands.push_back({L"branch", L"-D", branchName});
+
+    RunSimpleCommand({L"fetch", L"--prune", L"origin"}, true, L"", deletePreCommands);
 }
 
 void MainWindow::ShowBranchMenu() {
