@@ -52,4 +52,6 @@ BEGIN
     IDS_MSG_REVERT_CONFLICTS "git revert 产生冲突。请在冲突合并窗口解决后继续提交，或中止 revert。"
     IDS_MSG_REVERT_ABORT_CONFIRM "确定要中止当前 git revert 吗？"
     IDS_MSG_REVERT_NO_CONFLICTS "未检测到未合并文件。"
+    IDS_MENU_GC_PRUNE "clean unreachable objects"
+    IDS_MSG_GC_PRUNE_WARN "该操作将清除所有 reflog 并永久删除不可达对象（无法恢复），确定继续吗？"
 END

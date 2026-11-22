@@ -5016,6 +5016,21 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             RunSimpleCommand({L"push", L"origin", currentBranch, L"--force"}, true);
             return 0;
         }
+        case IDM_OTHER_GC_PRUNE: {
+            const int confirmResult = MessageBoxW(
+                hwnd_,
+                LoadStringResource(IDS_MSG_GC_PRUNE_WARN).c_str(),
+                LoadStringResource(IDS_MSG_FORCE_PUSH_TITLE).c_str(),
+                MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (confirmResult != IDOK) {
+                return 0;
+            }
+            // 先清空 reflog，成功后才 gc --prune=now，让不可达对象立即被回收
+            RunSimpleCommand(
+                {L"gc", L"--prune=now"}, false, L"",
+                {{L"reflog", L"expire", L"--expire=now", L"--all"}});
+            return 0;
+        }
         case IDM_COMMIT_RESET_HARD:
         case IDM_COMMIT_RESET_SOFT:
         case IDM_COMMIT_EDIT_MESSAGE:
@@ -5473,6 +5488,7 @@ HMENU MainWindow::BuildOtherToolbarMenu() {
         return nullptr;
     }
     AppendMenuW(menu, MF_STRING, IDM_OTHER_PUSH_FORCE, LoadStringResource(IDS_MENU_PUSH_FORCE).c_str());
+    AppendMenuW(menu, MF_STRING, IDM_OTHER_GC_PRUNE, LoadStringResource(IDS_MENU_GC_PRUNE).c_str());
     return menu;
 }
 
