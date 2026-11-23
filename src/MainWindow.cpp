@@ -4760,14 +4760,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                     std::wstring prompt =
                         L"The current branch has no upstream branch.\n\n"
                         L"Do you want to run:\n"
-                        L"git push --set-upstream origin " + currentBranch + L"\n";
+                        L"git push --set-upstream origin refs/heads/" + currentBranch + L"\n";
                     if (MessageBoxW(
                             hwnd_,
                             prompt.c_str(),
                             LoadStringResource(IDS_APP_TITLE).c_str(),
                             MB_ICONQUESTION | MB_YESNO) == IDYES) {
                         RunSimpleCommand(
-                            {L"push", L"--set-upstream", L"origin", currentBranch},
+                            {L"push", L"--set-upstream", L"origin", L"refs/heads/" + currentBranch},
                             true);
                         if (completedCancelEvent != nullptr && completedCancelEvent != currentCancelEvent_) {
                             state->cancelEvent = nullptr;
@@ -5013,7 +5013,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                             LoadStringResource(IDS_APP_TITLE).c_str(), MB_ICONWARNING);
                 return 0;
             }
-            RunSimpleCommand({L"push", L"origin", currentBranch, L"--force"}, true);
+            // 用 refs/heads/ 前缀消歧：分支与 tag 同名时裸分支名会匹配多个 ref
+            RunSimpleCommand({L"push", L"origin", L"refs/heads/" + currentBranch, L"--force"}, true);
             return 0;
         }
         case IDM_OTHER_GC_PRUNE: {
@@ -7127,7 +7128,7 @@ void MainWindow::RunDeleteBranch() {
     const GitCommandResult remoteCheck =
         GitRunner::RunGitCommand(path, {L"branch", L"-r", L"--list", remoteRef});
     if (remoteCheck.success && !remoteCheck.output.empty()) {
-        deletePreCommands.push_back({L"push", L"origin", L"--delete", branchName});
+        deletePreCommands.push_back({L"push", L"origin", L"--delete", L"refs/heads/" + branchName});
     }
     deletePreCommands.push_back({L"branch", L"-D", branchName});
 
@@ -7193,7 +7194,7 @@ void MainWindow::RunPushLocalBranch() {
         return;
     }
 
-    RunSimpleCommand({L"push", L"-u", L"origin", branchName}, true);
+    RunSimpleCommand({L"push", L"-u", L"origin", L"refs/heads/" + branchName}, true);
 }
 
 void MainWindow::ShowBranchMenu() {
@@ -7303,7 +7304,7 @@ void MainWindow::HandleBranchMenuCommand(UINT commandId) {
             return;
         }
         // 重命名成功后推送到 origin，用 -u 重新建立 upstream 跟踪（旧名跟踪已失效）
-        RunSimpleCommand({L"push", L"-u", L"origin", branchName}, true, L"",
+        RunSimpleCommand({L"push", L"-u", L"origin", L"refs/heads/" + branchName}, true, L"",
                          {{L"branch", L"-m", branchName}});
         return;
     }
