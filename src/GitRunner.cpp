@@ -442,12 +442,15 @@ std::vector<CommitInfo> GitRunner::GetUnpushedCommits(const std::wstring& repoPa
 
 std::vector<std::wstring> GitRunner::GetLocalBranches(const std::wstring& repoPath) {
     std::vector<std::wstring> branches;
-    const GitCommandResult result = RunGitCommand(repoPath, {L"branch", L"--format=%(refname:short)"});
+    // 用 lstrip=2 去掉 refs/heads/ 前缀：当分支与 tag 同名时，%(refname:short) 会
+    // 返回带 heads/ 前缀的名字（如 heads/2.2.1），checkout 它会进入 detached HEAD。
+    const GitCommandResult result = RunGitCommand(repoPath, {L"branch", L"--format=%(refname:lstrip=2)"});
     if (!result.success) {
         return branches;
     }
     for (const std::wstring& line : SplitLines(StripAnsiEscapes(result.output))) {
-        if (!line.empty()) {
+        // detached HEAD 时 git branch 会输出 (HEAD detached at ...) 伪条目，跳过它
+        if (!line.empty() && line.compare(0, 14, L"(HEAD detached") != 0) {
             branches.push_back(line);
         }
     }
